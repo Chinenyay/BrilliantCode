@@ -267,7 +267,7 @@ const makeGetFileSizeAdapter = (ctx: ToolContext) => async (args: GetFileSizeArg
 // -------------------- grepSearch --------------------
 type GrepSearchArgs = {
   pattern: string;
-  files: string; // relative glob or directory path; absolute paths rejected
+  files: string;
   caseInsensitive?: boolean;
   recursive?: boolean;
   lineNumbers?: boolean;
@@ -278,7 +278,6 @@ type GrepSearchArgs = {
 };
 
 function looksAbsoluteOrRooted(p: string): boolean {
-  // Block absolute POSIX and Windows drive-rooted paths
   return path.isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p);
 }
 
