@@ -1,6 +1,6 @@
 {
   "name": "brilliantcode",
-  "version": "1.3.6",
+  "version": "1.0.0",
   "description": "Your AI engineer, powered by the best frontier AI models.",
   "main": "dist/main/main.js",
   "type": "module",
@@ -85,7 +85,7 @@
           ]
         }
       ],
-      "artifactName": "BrilliantCode-${version}-${arch}.exe"
+      "artifactName": "BrilliantCode-open-${version}-${arch}.exe"
     },
     "linux": {
       "target": [
@@ -100,7 +100,7 @@
     "url": "git+https://github.com/brilliantai/BrilliantCode.git"
   },
   "author": "Jennifer Olafenwa",
-  "license": "ISC",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/brilliantai/BrilliantCode/issues"
   },

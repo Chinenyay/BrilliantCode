@@ -1,6 +1,7 @@
 module.exports = {
   appId: 'co.brilliantai.brilliantcode',
   productName: 'BrilliantCode',
+  artifactName: 'brilliantcode-open-${version}-${arch}.${ext}',
   directories: {
     output: 'release',
     buildResources: 'resources'
@@ -34,7 +35,7 @@ module.exports = {
   },
   win: {
     target: [{ target: 'nsis', arch: ['x64', 'arm64'] }],
-    artifactName: 'BrilliantCode-${version}-${arch}.exe'
+    artifactName: 'brilliantcode-open-${version}-${arch}.${ext}'
   },
   linux: {
     target: [
