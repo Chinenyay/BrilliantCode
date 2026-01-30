@@ -21,7 +21,7 @@ import {
   undoWorkspaceBaselineAll,
   undoWorkspaceBaselineFile,
 } from './workspaceBaseline.js';
-import { MODELS, getModelProvider } from '../agent/models.js';
+import { MODELS, getModelProvider, setCustomModels, isBuiltinModel, type Provider } from '../agent/models.js';
 import type { OpenAIResponseItem } from '../types/chat.js';
 import { listDirTree } from '../agent/dirTree.js';
 import { promises as fs } from 'node:fs';
@@ -814,7 +814,8 @@ function attachWebviewDebugging(win: Electron.BrowserWindow, contents: Electron.
 
 // Persist a small settings blob so the chosen working folder survives restarts
 // (also used for a stable, non-PII prompt cache seed when unauthenticated).
-type AppSettings = { lastWorkingDir?: string; promptCacheSeed?: string };
+type CustomModelSetting = { key: string; name?: string; apiName?: string; provider?: Provider; type?: string };
+type AppSettings = { lastWorkingDir?: string; promptCacheSeed?: string; customModels?: CustomModelSetting[] };
 let settingsPath = '';
 async function loadSettings(): Promise<AppSettings> {
   try {
@@ -833,6 +834,22 @@ async function saveSettings(s: AppSettings): Promise<void> {
   } catch (err) {
     console.warn('Failed to save settings:', err);
   }
+}
+
+async function getCustomModelsFromSettings(): Promise<CustomModelSetting[]> {
+  try {
+    const s = await loadSettings();
+    if (!Array.isArray(s.customModels)) return [];
+    return s.customModels.filter(m => m && typeof m.key === 'string');
+  } catch {
+    return [];
+  }
+}
+
+async function persistCustomModels(list: CustomModelSetting[]): Promise<void> {
+  const current = await loadSettings();
+  await saveSettings({ ...current, customModels: list });
+  setCustomModels(list);
 }
 
 // Prompt caching (OpenAI Responses API): enable a stable prompt_cache_key and request
@@ -3156,6 +3173,13 @@ app.whenReady().then(async () => {
     console.warn('Failed to configure app branding.', error);
   }
 
+  try {
+    const custom = await getCustomModelsFromSettings();
+    setCustomModels(custom);
+  } catch (error) {
+    console.warn('Failed to load custom models:', error);
+  }
+
   await bootstrapApplication();
   while (pendingStartupOpenUrls.length) {
     pendingStartupOpenUrls.shift();
@@ -3713,10 +3737,56 @@ ipcMain.handle('ai:models:list', async () => {
       name: model.name,
       provider: model.provider,
       type: model.type,
+      source: isBuiltinModel(key) ? 'builtin' : 'custom',
     }));
     return { ok: true, models };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? 'Failed to list models');
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle('ai:models:add', async (_event: Electron.IpcMainInvokeEvent, payload: { key?: string; name?: string; provider?: string; type?: string }) => {
+  try {
+    const key = typeof payload?.key === 'string' ? payload.key.trim() : '';
+    if (!key) return { ok: false, error: 'Model key is required.' };
+    if (isBuiltinModel(key)) return { ok: false, error: 'Built-in models cannot be overridden.' };
+
+    const provider: Provider = payload?.provider === 'anthropic' ? 'anthropic' : 'openai';
+    const name = typeof payload?.name === 'string' && payload.name.trim() ? payload.name.trim() : key;
+    const type = typeof payload?.type === 'string' && payload.type.trim() ? payload.type.trim() : 'reasoning';
+
+    const list = await getCustomModelsFromSettings();
+    const filtered = list.filter(m => m && m.key !== key);
+    filtered.push({ key, name, provider, type });
+
+    await persistCustomModels(filtered);
+
+    return { ok: true, models: Object.entries(MODELS).map(([k, model]) => ({
+      key: k, name: model.name, provider: model.provider, type: model.type, source: isBuiltinModel(k) ? 'builtin' : 'custom',
+    })) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? 'Failed to add model');
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle('ai:models:remove', async (_event: Electron.IpcMainInvokeEvent, payload: { key?: string }) => {
+  try {
+    const key = typeof payload?.key === 'string' ? payload.key.trim() : '';
+    if (!key) return { ok: false, error: 'Model key is required.' };
+    if (isBuiltinModel(key)) return { ok: false, error: 'Cannot remove built-in models.' };
+
+    const list = await getCustomModelsFromSettings();
+    const filtered = list.filter(m => m && m.key !== key);
+
+    await persistCustomModels(filtered);
+
+    return { ok: true, models: Object.entries(MODELS).map(([k, model]) => ({
+      key: k, name: model.name, provider: model.provider, type: model.type, source: isBuiltinModel(k) ? 'builtin' : 'custom',
+    })) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? 'Failed to remove model');
     return { ok: false, error: message };
   }
 });

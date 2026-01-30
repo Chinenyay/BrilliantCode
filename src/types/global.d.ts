@@ -78,14 +78,8 @@ declare global {
         highlight?: boolean;
         monthly_credits?: number | null;
         plan_type?: string;
-      }>; creditPacks?: Array<{
-        id: string;
-        price: number;
-        credits: number;
-        currency: string;
       }>; showPricing?: boolean; error?: string }>;
       checkout: (plan: string) => Promise<{ ok: boolean; url?: string; error?: string }>;
-      checkoutCredits: (packId: string) => Promise<{ ok: boolean; url?: string; error?: string }>;
       onStateChange?: (handler: (state: {
         ok: boolean;
         checkedAt: number;
@@ -110,6 +104,9 @@ declare global {
       };
       models: {
         list: () => Promise<{ ok: boolean; models?: any[]; error?: string }>;
+        add: (payload: { key: string; name?: string; provider?: 'openai' | 'anthropic'; type?: string }) =>
+          Promise<{ ok: boolean; models?: any[]; error?: string }>;
+        remove: (key: string) => Promise<{ ok: boolean; models?: any[]; error?: string }>;
       };
       chatStream: (
         messages: OpenAIResponseItem[],

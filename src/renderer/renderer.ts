@@ -758,7 +758,7 @@ const uiState: UiState = { mode: 'agent', reasoning: 'medium', model: 'gpt-5.2',
 let lastSentAgentMode: UiState['mode'] | null = null;
 const ALL_REASONING_OPTIONS: UiState['reasoning'][] = ['low', 'medium', 'high', 'xhigh'];
 
-type ModelMeta = { key: string; name: string; provider?: string; type?: string };
+type ModelMeta = { key: string; name: string; provider?: string; type?: string; source?: 'builtin' | 'custom' };
 let modelsMeta: ModelMeta[] = [];
 
 type ToastKind = 'info' | 'success' | 'error';
@@ -791,14 +791,6 @@ type PricingPlan = {
   monthly_credits?: number | null;
   plan_type?: string;
 };
-
-type CreditPack = {
-  id: string;
-  price: number;
-  credits: number;
-  currency: string;
-};
-
 let latestBillingState: BillingState | null = null;
 let openPaywall: (() => void) | null = null;
 let promptPaywall: (() => void) | null = null;
@@ -967,7 +959,6 @@ function setupPaywall(): void {
   let autoShown = false;
   let lastAuth = false;
   let lastUserKey = '';
-  let creditPacks: CreditPack[] = [];
   let paywallMode: 'plan' | 'credits' = 'plan';
 
   const isDismissed = (): boolean => {
@@ -1038,13 +1029,13 @@ function setupPaywall(): void {
   const setPaywallCopy = (mode: 'plan' | 'credits'): void => {
     paywallMode = mode;
     if (titleEl) {
-      titleEl.textContent = mode === 'credits' ? 'Top up credits' : 'Choose a plan';
+      titleEl.textContent = 'Choose a plan';
     }
     if (subtitleEl) {
       subtitleEl.textContent =
         mode === 'credits'
-          ? 'You are out of credits. Add credits to continue.'
-          : 'Select a plan or top up credits to continue.';
+          ? 'You are out of credits. Pick a plan to continue.'
+          : 'Select a plan to continue.';
     }
     dismissBtn.textContent = 'Continue without changes';
   };
@@ -1099,8 +1090,6 @@ function setupPaywall(): void {
         const intervalValue = (plan.interval ?? '').toLowerCase();
         if (intervalValue === 'year') {
           interval.textContent = 'per year';
-        } else if (intervalValue === 'topup' || plan.plan_type === 'payg') {
-          interval.textContent = 'top up';
         } else {
           interval.textContent = 'per month';
         }
@@ -1180,54 +1169,6 @@ function setupPaywall(): void {
         plansEl.appendChild(card);
       }
     }
-
-    const canTopup = creditPacks.length > 0;
-    if (canTopup) {
-      const packs = Array.isArray(creditPacks) ? creditPacks : [];
-      if (packs.length) {
-        const topup = document.createElement('section');
-        topup.className = 'paywall-topup';
-
-        const header = document.createElement('div');
-        header.className = 'paywall-topup-header';
-        const title = document.createElement('h3');
-        title.textContent = 'Top up credits';
-        const subtitle = document.createElement('p');
-        subtitle.textContent = 'Add credits or choose a plan for more monthly credits.';
-        header.append(title, subtitle);
-
-        const packsWrap = document.createElement('div');
-        packsWrap.className = 'paywall-pack-grid';
-        for (const pack of packs) {
-          const packBtn = document.createElement('button');
-          packBtn.type = 'button';
-          packBtn.className = 'paywall-plan-cta paywall-pack-cta';
-          packBtn.textContent = `${formatPrice(pack.price, pack.currency)} · ${pack.credits} credits`;
-          packBtn.addEventListener('click', async () => {
-            packBtn.disabled = true;
-            const originalText = packBtn.textContent || '';
-            packBtn.textContent = 'Opening Stripe checkout...';
-            try {
-              const res = await window.billing?.checkoutCredits?.(pack.id);
-              if (!res?.ok) {
-                throw new Error(res?.error || 'Failed to start checkout.');
-              }
-              showToast('Checkout opened in your browser. Return to the app when done.', 'info');
-              startCheckoutPolling();
-            } catch (error: any) {
-              showToast(error?.message || 'Failed to start checkout.', 'error');
-            } finally {
-              packBtn.disabled = false;
-              packBtn.textContent = originalText;
-            }
-          });
-          packsWrap.appendChild(packBtn);
-        }
-
-        topup.append(header, packsWrap);
-        plansEl.appendChild(topup);
-      }
-    }
   };
 
   const loadPricing = async (): Promise<void> => {
@@ -1237,7 +1178,6 @@ function setupPaywall(): void {
       const res = await window.billing?.pricing?.();
       if (!res?.ok) throw new Error(res?.error || 'Failed to load pricing.');
       const plans = Array.isArray((res as any).plans) ? (res as any).plans as PricingPlan[] : [];
-      creditPacks = Array.isArray((res as any).creditPacks) ? (res as any).creditPacks as CreditPack[] : [];
       if (!plans.length) throw new Error('No pricing plans available.');
       renderPlans(plans);
     } catch (error: any) {
@@ -1783,6 +1723,211 @@ function setupNoticeToasts(): void {
   } catch { }
 }
 
+function openCustomModelDialog(onChanged?: () => void): void {
+  if (document.getElementById('custom-model-overlay')) return;
+
+  // Hide the WebContentsView (right pane child view) so the modal appears above it
+  try { window.layout?.setRightBounds?.({ x: 0, y: 0, width: 0, height: 0 }); } catch { }
+
+  const restoreRightPane = () => {
+    // Trigger a resize event to restore the right pane bounds via setupBoundsSync
+    try { window.dispatchEvent(new Event('resize')); } catch { }
+  };
+
+  const overlay = document.createElement('div');
+  overlay.id = 'custom-model-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:2147483000;padding:16px;';
+
+  const card = document.createElement('div');
+  card.style.cssText = [
+    'width:min(520px,92vw)',
+    'max-height:min(90vh,720px)',
+    'overflow:auto',
+    'background:#0f0f10',
+    'border:1px solid #2a2a2a',
+    'border-radius:14px',
+    'padding:16px',
+    'color:#eaeaea',
+    'box-shadow:0 18px 48px rgba(0,0,0,0.55)',
+    'box-sizing:border-box',
+  ].join(';');
+
+  const title = document.createElement('div');
+  title.style.cssText = 'font-weight:600;font-size:16px;margin-bottom:8px;';
+  title.textContent = 'Add new model';
+  card.appendChild(title);
+
+  const desc = document.createElement('p');
+  desc.style.cssText = 'margin:0 0 12px;color:#b8b8b8;font-size:12px;line-height:1.45;';
+  desc.textContent = 'Point at any OpenAI-compatible Responses API model. Name is optional; default uses the model key.';
+  card.appendChild(desc);
+
+  const form = document.createElement('form');
+  form.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
+
+  const makeField = (labelText: string, input: HTMLElement) => {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;font-size:12px;color:#cfcfcf;';
+    const lbl = document.createElement('span');
+    lbl.textContent = labelText;
+    lbl.style.cssText = 'opacity:0.9;';
+    wrap.appendChild(lbl);
+    wrap.appendChild(input);
+    return wrap;
+  };
+
+  const keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.placeholder = 'gpt-4.1-mini';
+  keyInput.required = true;
+  keyInput.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
+  form.appendChild(makeField('Model ID (as sent to the API)', keyInput));
+
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.placeholder = 'Display name (optional)';
+  nameInput.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
+  form.appendChild(makeField('Display name', nameInput));
+
+  const providerSelect = document.createElement('select');
+  providerSelect.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
+  ['openai', 'anthropic'].forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p === 'openai' ? 'OpenAI-compatible' : 'Anthropic-compatible';
+    providerSelect.appendChild(opt);
+  });
+  form.appendChild(makeField('Provider', providerSelect));
+
+  const typeSelect = document.createElement('select');
+  typeSelect.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
+  [
+    { value: 'reasoning', label: 'Reasoning (default)' },
+    { value: 'chat', label: 'Chat' },
+    { value: 'extended_thinking', label: 'Extended thinking' },
+  ].forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t.value;
+    opt.textContent = t.label;
+    typeSelect.appendChild(opt);
+  });
+  form.appendChild(makeField('Type', typeSelect));
+
+  const errorEl = document.createElement('div');
+  errorEl.style.cssText = 'min-height:16px;color:#f6b0b0;font-size:12px;';
+  form.appendChild(errorEl);
+
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px;margin-top:4px;';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.style.cssText = 'padding:8px 12px;border-radius:8px;border:1px solid #333;background:#1a1a1a;color:#eaeaea;cursor:pointer;min-width:96px;';
+  cancelBtn.addEventListener('click', () => { overlay.remove(); restoreRightPane(); });
+  actions.appendChild(cancelBtn);
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'submit';
+  saveBtn.textContent = 'Save';
+  saveBtn.style.cssText = 'padding:8px 12px;border-radius:8px;border:1px solid #3a6ee8;background:#2554c7;color:#fff;cursor:pointer;min-width:110px;';
+  actions.appendChild(saveBtn);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const key = keyInput.value.trim();
+    const name = nameInput.value.trim();
+    const provider = providerSelect.value === 'anthropic' ? 'anthropic' : 'openai';
+    const type = typeSelect.value || 'reasoning';
+    if (!key) {
+      errorEl.textContent = 'Model key is required.';
+      return;
+    }
+    errorEl.textContent = 'Saving…';
+    saveBtn.disabled = true;
+    try {
+      const res = await window.ai?.models?.add?.({ key, name, provider, type });
+      if (!res || !res.ok) {
+        errorEl.textContent = res?.error || 'Failed to save model.';
+        saveBtn.disabled = false;
+        return;
+      }
+      showToast('Custom model added', 'success');
+      overlay.remove();
+      restoreRightPane();
+      onChanged?.();
+    } catch (err: any) {
+      errorEl.textContent = err?.message || 'Save failed.';
+      saveBtn.disabled = false;
+    }
+  });
+
+  form.appendChild(actions);
+  card.appendChild(form);
+
+  const divider = document.createElement('div');
+  divider.style.cssText = 'border-top:1px solid #222;margin:14px -16px 10px;';
+  card.appendChild(divider);
+
+  const listTitle = document.createElement('div');
+  listTitle.textContent = 'Custom models';
+  listTitle.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:8px;';
+  card.appendChild(listTitle);
+
+  const list = document.createElement('div');
+  list.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-height:min(32vh,220px);overflow:auto;';
+  const customs = modelsMeta.filter(m => m.source === 'custom');
+  if (customs.length === 0) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'color:#9a9a9a;font-size:12px;';
+    empty.textContent = 'No custom models yet.';
+    list.appendChild(empty);
+  } else {
+    for (const m of customs) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid #1f1f1f;border-radius:8px;background:#131313;';
+      const label = document.createElement('div');
+      label.style.cssText = 'display:flex;flex-direction:column;';
+      const title = document.createElement('span');
+      title.textContent = m.name || m.key;
+      title.style.cssText = 'font-size:13px;color:#eaeaea;';
+      const meta = document.createElement('span');
+      meta.textContent = `${m.provider || 'openai'} · ${m.key}`;
+      meta.style.cssText = 'font-size:11px;color:#a0a0a0;';
+      label.appendChild(title);
+      label.appendChild(meta);
+      row.appendChild(label);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = 'Remove';
+      del.style.cssText = 'padding:6px 10px;border-radius:8px;border:1px solid #3a2424;background:#1f1313;color:#f2c3c3;cursor:pointer;';
+      del.addEventListener('click', async () => {
+        try {
+          const res = await window.ai?.models?.remove?.(m.key);
+          if (!res || !res.ok) {
+            showToast(res?.error || 'Failed to remove model', 'error');
+            return;
+          }
+          showToast('Removed custom model', 'success');
+          overlay.remove();
+          restoreRightPane();
+          onChanged?.();
+        } catch (err: any) {
+          showToast(err?.message || 'Failed to remove model', 'error');
+        }
+      });
+      row.appendChild(del);
+      list.appendChild(row);
+    }
+  }
+
+  card.appendChild(list);
+
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+}
+
 async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
   if (!menu) return;
   menu.innerHTML = '<div class="item" role="menuitem" style="opacity:.7">Loading…</div>';
@@ -1797,6 +1942,7 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
       name: String(m?.name || m?.key || ''),
       provider: typeof m?.provider === 'string' ? m.provider : getModelProvider(String(m?.key || '')),
       type: typeof m?.type === 'string' ? m.type : undefined,
+      source: m?.source === 'custom' ? 'custom' : 'builtin',
     })).filter(meta => meta.key);
     menu.innerHTML = '';
 
@@ -1835,6 +1981,17 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
       btn.addEventListener('click', () => onSelect(meta.key));
       menu.appendChild(btn);
     }
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'item';
+    addBtn.type = 'button';
+    addBtn.setAttribute('role', 'menuitem');
+    addBtn.textContent = 'Add new model…';
+    addBtn.addEventListener('click', () => {
+      closeAllDropdowns();
+      openCustomModelDialog(() => { void populateModelMenu(menu); });
+    });
+    menu.appendChild(addBtn);
 
     if (!modelsMeta.some(meta => meta.key === uiState.model)) {
       uiState.model = modelsMeta[0]?.key || uiState.model;
@@ -5747,7 +5904,7 @@ function setupAiInput(): void {
 
     const creditsOk = hasCredits(billing);
     if (billing && billing.authenticated && billing.ok && !creditsOk) {
-      const assistantText = 'No credits remaining. Choose a plan or top up credits.';
+      const assistantText = 'No credits remaining. Choose a plan to continue.';
       const assistantEvent: ChatMessageEvent = { type: 'message', content: assistantText, timestamp: Date.now() };
       const assistantItem: OpenAIResponseItem = { role: 'assistant', content: [{ type: 'output_text', text: assistantText }] };
       appendEventToActiveChat(assistantEvent);

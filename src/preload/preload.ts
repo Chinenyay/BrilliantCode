@@ -256,6 +256,10 @@ contextBridge.exposeInMainWorld("ai", {
   },
   models: {
     list: (): Promise<{ ok: boolean; models?: any[]; error?: string }> => ipcRenderer.invoke('ai:models:list'),
+    add: (payload: { key: string; name?: string; provider?: 'openai' | 'anthropic'; type?: string }): Promise<{ ok: boolean; models?: any[]; error?: string }> =>
+      ipcRenderer.invoke('ai:models:add', payload),
+    remove: (key: string): Promise<{ ok: boolean; models?: any[]; error?: string }> =>
+      ipcRenderer.invoke('ai:models:remove', { key }),
   },
   chatStream: (
     messages: OpenAIResponseItem[],

@@ -86,6 +86,7 @@ Set keys either:
 - `OPENAI_BASE_URL` (or `OPENAI_API_BASE`) - Point to any OpenAI-compatible Responses API host (e.g., local/OpenRouter). Defaults to `https://api.openai.com/v1`.
 - `GOOGLE_CSE_API_KEY` and `GOOGLE_CSE_ID` - For web search via Google Custom Search
 - `BRILLIANTCODE_DEFAULT_MODEL` - Override the default model
+- Add custom models from the in-app model picker (`Add custom model…`) to target any OpenAI-compatible model ID.
 
 ---
 

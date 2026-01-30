@@ -16,6 +16,14 @@ export type Model = {
   compactionTargetTokens?: number;
 };
 
+export type CustomModelInput = {
+  key: string;
+  name?: string;
+  apiName?: string;
+  provider?: Provider;
+  type?: string;
+};
+
 // These keys map to deployment/model names that the renderer passes back from the
 // model picker. The main process relays the chosen string directly to the SDK.
 export const OPENAI_MODELS: Record<string, Model> = {
@@ -86,6 +94,49 @@ export const MODELS: Record<string, Model> = {
   ...OPENAI_MODELS,
   ...ANTHROPIC_MODELS
 };
+
+const BUILTIN_MODEL_KEYS = new Set(Object.keys(OPENAI_MODELS).concat(Object.keys(ANTHROPIC_MODELS)));
+let customModels: Record<string, Model> = {};
+
+export function isBuiltinModel(key: string): boolean {
+  return BUILTIN_MODEL_KEYS.has(key);
+}
+
+export function setCustomModels(list: CustomModelInput[] | undefined | null): void {
+  const next: Record<string, Model> = {};
+  if (Array.isArray(list)) {
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object') continue;
+      const key = typeof raw.key === 'string' ? raw.key.trim() : '';
+      if (!key) continue;
+      if (isBuiltinModel(key)) continue;
+      const provider: Provider = raw.provider === 'anthropic' ? 'anthropic' : 'openai';
+      const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : key;
+      const apiName = typeof raw.apiName === 'string' && raw.apiName.trim() ? raw.apiName.trim() : undefined;
+      const type = typeof raw.type === 'string' && raw.type.trim() ? raw.type.trim() : 'reasoning';
+      next[key] = {
+        name,
+        apiName,
+        type,
+        provider,
+        streaming: false,
+        reasoning: type === 'reasoning' || type === 'extended_thinking',
+        extendedThinking: type === 'extended_thinking',
+        contextWindowTokens: undefined,
+        compactionTargetTokens: undefined,
+      };
+    }
+  }
+  customModels = next;
+  for (const key of Object.keys(MODELS)) {
+    delete (MODELS as any)[key];
+  }
+  Object.assign(MODELS, { ...OPENAI_MODELS, ...ANTHROPIC_MODELS, ...customModels });
+}
+
+export function getCustomModels(): Record<string, Model> {
+  return { ...customModels };
+}
 
 export function supportsReasoning(modelName: string): boolean {
   const model = MODELS[modelName];
