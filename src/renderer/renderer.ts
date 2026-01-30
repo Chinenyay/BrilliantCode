@@ -1962,6 +1962,10 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
       closeAllDropdowns();
     };
 
+    // Create scrollable container for model items
+    const scrollContainer = document.createElement('div');
+    scrollContainer.className = 'model-list-scroll';
+
     for (const meta of modelsMeta) {
       const btn = document.createElement('button');
       btn.className = 'item';
@@ -1979,9 +1983,13 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
         btn.title = '';
       }
       btn.addEventListener('click', () => onSelect(meta.key));
-      menu.appendChild(btn);
+      scrollContainer.appendChild(btn);
     }
+    menu.appendChild(scrollContainer);
 
+    // Create fixed footer for "Add new model" button
+    const footer = document.createElement('div');
+    footer.className = 'model-add-footer';
     const addBtn = document.createElement('button');
     addBtn.className = 'item';
     addBtn.type = 'button';
@@ -1991,7 +1999,8 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
       closeAllDropdowns();
       openCustomModelDialog(() => { void populateModelMenu(menu); });
     });
-    menu.appendChild(addBtn);
+    footer.appendChild(addBtn);
+    menu.appendChild(footer);
 
     if (!modelsMeta.some(meta => meta.key === uiState.model)) {
       uiState.model = modelsMeta[0]?.key || uiState.model;
