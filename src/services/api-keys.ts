@@ -1,12 +1,13 @@
 import keytarModule from 'keytar';
 
-export type LlmProvider = 'openai' | 'anthropic';
+export type LlmProvider = 'openai' | 'openai_compat' | 'anthropic';
 
 const keytar = (keytarModule as unknown as { default?: typeof keytarModule } & typeof keytarModule).default ?? keytarModule;
 
 const KEYTAR_SERVICE = 'brilliantcode-api-keys';
-const OPENAI_BASE_URL_ACCOUNT = 'openai-base-url';
-const OPENAI_BASE_URL_ENV_KEYS = ['OPENAI_BASE_URL', 'OPENAI_API_BASE'];
+const LEGACY_OPENAI_BASE_URL_ACCOUNT = 'openai-base-url';
+const OPENAI_COMPAT_BASE_URL_ACCOUNT = 'openai-compat-base-url';
+const OPENAI_COMPAT_BASE_URL_ENV_KEYS = ['OPENAI_COMPAT_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_API_BASE'];
 
 function normalizeKey(value: unknown): string {
   if (typeof value !== 'string') return '';
@@ -19,7 +20,9 @@ function normalizeBaseUrl(value: unknown): string {
 }
 
 function providerToEnvKey(provider: LlmProvider): string {
-  return provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
+  if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+  if (provider === 'openai_compat') return 'OPENAI_COMPAT_API_KEY';
+  return 'OPENAI_API_KEY';
 }
 
 function providerToAccount(provider: LlmProvider): string {
@@ -27,7 +30,12 @@ function providerToAccount(provider: LlmProvider): string {
 }
 
 export async function setApiKey(provider: LlmProvider, apiKey: string): Promise<void> {
-  const normalizedProvider: LlmProvider = provider === 'anthropic' ? 'anthropic' : 'openai';
+  const normalizedProvider: LlmProvider =
+    provider === 'anthropic'
+      ? 'anthropic'
+      : provider === 'openai_compat'
+        ? 'openai_compat'
+        : 'openai';
   const normalizedKey = normalizeKey(apiKey);
   const account = providerToAccount(normalizedProvider);
 
@@ -42,7 +50,12 @@ export async function setApiKey(provider: LlmProvider, apiKey: string): Promise<
 }
 
 export async function getApiKey(provider: LlmProvider): Promise<{ key: string; source: 'keytar' | 'env' | null }> {
-  const normalizedProvider: LlmProvider = provider === 'anthropic' ? 'anthropic' : 'openai';
+  const normalizedProvider: LlmProvider =
+    provider === 'anthropic'
+      ? 'anthropic'
+      : provider === 'openai_compat'
+        ? 'openai_compat'
+        : 'openai';
   const account = providerToAccount(normalizedProvider);
 
   try {
@@ -62,25 +75,33 @@ export async function hasApiKey(provider: LlmProvider): Promise<boolean> {
   return !!res.key;
 }
 
-export async function setOpenAIBaseUrl(baseUrl: string): Promise<void> {
+export async function setOpenAICompatBaseUrl(baseUrl: string): Promise<void> {
   const normalized = normalizeBaseUrl(baseUrl);
   if (!normalized) {
     try {
-      await keytar.deletePassword(KEYTAR_SERVICE, OPENAI_BASE_URL_ACCOUNT);
+      await keytar.deletePassword(KEYTAR_SERVICE, OPENAI_COMPAT_BASE_URL_ACCOUNT);
+    } catch {}
+    try {
+      await keytar.deletePassword(KEYTAR_SERVICE, LEGACY_OPENAI_BASE_URL_ACCOUNT);
     } catch {}
     return;
   }
 
-  await keytar.setPassword(KEYTAR_SERVICE, OPENAI_BASE_URL_ACCOUNT, normalized);
+  await keytar.setPassword(KEYTAR_SERVICE, OPENAI_COMPAT_BASE_URL_ACCOUNT, normalized);
 }
 
-export async function getOpenAIBaseUrl(): Promise<{ url: string; source: 'keytar' | 'env' | null }> {
+export async function getOpenAICompatBaseUrl(): Promise<{ url: string; source: 'keytar' | 'env' | null }> {
   try {
-    const stored = normalizeBaseUrl(await keytar.getPassword(KEYTAR_SERVICE, OPENAI_BASE_URL_ACCOUNT));
+    const stored = normalizeBaseUrl(await keytar.getPassword(KEYTAR_SERVICE, OPENAI_COMPAT_BASE_URL_ACCOUNT));
     if (stored) return { url: stored, source: 'keytar' };
   } catch {}
 
-  for (const key of OPENAI_BASE_URL_ENV_KEYS) {
+  try {
+    const legacy = normalizeBaseUrl(await keytar.getPassword(KEYTAR_SERVICE, LEGACY_OPENAI_BASE_URL_ACCOUNT));
+    if (legacy) return { url: legacy, source: 'keytar' };
+  } catch {}
+
+  for (const key of OPENAI_COMPAT_BASE_URL_ENV_KEYS) {
     const fromEnv = normalizeBaseUrl(process.env[key]);
     if (fromEnv) return { url: fromEnv, source: 'env' };
   }
@@ -88,24 +109,43 @@ export async function getOpenAIBaseUrl(): Promise<{ url: string; source: 'keytar
   return { url: '', source: null };
 }
 
+// Backwards-compatible aliases (OPENAI_BASE_URL now treated as OpenAI-compatible).
+export async function setOpenAIBaseUrl(baseUrl: string): Promise<void> {
+  return setOpenAICompatBaseUrl(baseUrl);
+}
+
+export async function getOpenAIBaseUrl(): Promise<{ url: string; source: 'keytar' | 'env' | null }> {
+  return getOpenAICompatBaseUrl();
+}
+
 export async function getApiKeysStatus(): Promise<{
-  openai: {
+  openai: { configured: boolean; source: 'keytar' | 'env' | null };
+  openaiCompat: {
     configured: boolean;
     source: 'keytar' | 'env' | null;
     baseUrl: { configured: boolean; source: 'keytar' | 'env' | null; value?: string };
   };
   anthropic: { configured: boolean; source: 'keytar' | 'env' | null };
 }> {
-  const [openai, anthropic, openaiBase] = await Promise.all([
+  const [openai, openaiCompat, openaiCompatBase, anthropic] = await Promise.all([
     getApiKey('openai'),
+    getApiKey('openai_compat'),
+    getOpenAICompatBaseUrl(),
     getApiKey('anthropic'),
-    getOpenAIBaseUrl(),
   ]);
   return {
     openai: {
       configured: !!openai.key,
       source: openai.source,
-      baseUrl: { configured: !!openaiBase.url, source: openaiBase.source, value: openaiBase.url || undefined },
+    },
+    openaiCompat: {
+      configured: !!openaiCompat.key,
+      source: openaiCompat.source,
+      baseUrl: {
+        configured: !!openaiCompatBase.url,
+        source: openaiCompatBase.source,
+        value: openaiCompatBase.url || undefined,
+      },
     },
     anthropic: { configured: !!anthropic.key, source: anthropic.source },
   };

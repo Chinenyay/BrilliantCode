@@ -26,16 +26,20 @@ declare global {
           openai: {
             configured: boolean;
             source: 'keytar' | 'env' | null;
+          };
+          openaiCompat: {
+            configured: boolean;
+            source: 'keytar' | 'env' | null;
             baseUrl: { configured: boolean; source: 'keytar' | 'env' | null; value?: string };
           };
           anthropic: { configured: boolean; source: 'keytar' | 'env' | null };
         };
         error?: string;
       }>;
-      set: (provider: 'openai' | 'anthropic', apiKey: string) => Promise<{ ok: boolean; error?: string }>;
-      clear: (provider: 'openai' | 'anthropic') => Promise<{ ok: boolean; error?: string }>;
-      setBaseUrl: (baseUrl: string) => Promise<{ ok: boolean; error?: string }>;
-      clearBaseUrl: () => Promise<{ ok: boolean; error?: string }>;
+      set: (provider: 'openai' | 'openai_compat' | 'anthropic', apiKey: string) => Promise<{ ok: boolean; error?: string }>;
+      clear: (provider: 'openai' | 'openai_compat' | 'anthropic') => Promise<{ ok: boolean; error?: string }>;
+      setCompatBaseUrl: (baseUrl: string) => Promise<{ ok: boolean; error?: string }>;
+      clearCompatBaseUrl: () => Promise<{ ok: boolean; error?: string }>;
       showDialog?: () => void;
     };
     billing?: {
@@ -104,7 +108,8 @@ declare global {
       };
       models: {
         list: () => Promise<{ ok: boolean; models?: any[]; error?: string }>;
-        add: (payload: { key: string; name?: string; provider?: 'openai' | 'anthropic'; type?: string }) =>
+        hidden: () => Promise<{ ok: boolean; models?: any[]; error?: string }>;
+        add: (payload: { key: string; name?: string; provider?: 'openai' | 'openai_compat' | 'anthropic'; type?: string }) =>
           Promise<{ ok: boolean; models?: any[]; error?: string }>;
         remove: (key: string) => Promise<{ ok: boolean; models?: any[]; error?: string }>;
       };

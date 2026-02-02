@@ -21,9 +21,11 @@ async function refreshStatus(): Promise<void> {
       return;
     }
     const openai = res.status.openai?.configured === true;
+    const openaiCompat = res.status.openaiCompat?.configured === true;
     const anthropic = res.status.anthropic?.configured === true;
     const summary = [
       `OpenAI: ${openai ? 'configured' : 'missing'}`,
+      `OpenAI-compatible: ${openaiCompat ? 'configured' : 'missing'}`,
       `Anthropic: ${anthropic ? 'configured' : 'missing'}`,
     ].join(' · ');
     setStatus(summary, 'info');

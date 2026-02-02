@@ -27,6 +27,7 @@ import shell from 'highlight.js/lib/languages/shell';
 import dockerfile from 'highlight.js/lib/languages/dockerfile';
 import plaintext from 'highlight.js/lib/languages/plaintext';
 import 'highlight.js/styles/github-dark.css';
+import { createIcons, Trash } from 'lucide';
 
 // Renderer boot script. Manages UI state, wires DOM controls to the preload
 // surface, and renders live AI responses (including tool progress + reasoning
@@ -1416,6 +1417,20 @@ function loadUiState(): void {
   enforceReasoningForModel();
 }
 function saveUiState(): void { try { localStorage.setItem('bc.ui', JSON.stringify(uiState)); } catch { } }
+function updateDropdownSelection(menuId: string, value: string): void {
+  const menu = document.getElementById(menuId);
+  if (!menu) return;
+  menu.querySelectorAll<HTMLElement>('.item').forEach(item => {
+    const itemValue = item.getAttribute('data-value');
+    const selected = !!itemValue && itemValue === value;
+    item.classList.toggle('is-selected', selected);
+    if (selected) {
+      item.setAttribute('aria-current', 'true');
+    } else {
+      item.removeAttribute('aria-current');
+    }
+  });
+}
 function syncUiLabels(): void {
   const modeText = document.querySelector('#btn-mode .label-text') as HTMLElement | null;
   if (modeText) modeText.textContent = uiState.mode === 'agent' ? 'Agent' : uiState.mode === 'agent_full' ? 'Full Access' : 'Chat';
@@ -1437,6 +1452,9 @@ function syncUiLabels(): void {
     const meta = modelsMeta.find(m => m.key === uiState.model);
     model.textContent = meta?.name || uiState.model;
   }
+  updateDropdownSelection('dd-mode', uiState.mode);
+  updateDropdownSelection('dd-reason', uiState.reasoning);
+  updateDropdownSelection('dd-model', uiState.model);
   applyReasoningConstraints();
 
   if (lastSentAgentMode !== uiState.mode) {
@@ -1736,19 +1754,19 @@ function openCustomModelDialog(onChanged?: () => void): void {
 
   const overlay = document.createElement('div');
   overlay.id = 'custom-model-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:2147483000;padding:16px;';
+  overlay.style.cssText = 'position:fixed;inset:0;background:var(--custom-model-overlay);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:2147483000;padding:16px;';
 
   const card = document.createElement('div');
   card.style.cssText = [
     'width:min(520px,92vw)',
     'max-height:min(90vh,720px)',
     'overflow:auto',
-    'background:#0f0f10',
-    'border:1px solid #2a2a2a',
+    'background:var(--custom-model-card-bg)',
+    'border:1px solid var(--custom-model-card-border)',
     'border-radius:14px',
     'padding:16px',
-    'color:#eaeaea',
-    'box-shadow:0 18px 48px rgba(0,0,0,0.55)',
+    'color:var(--custom-model-card-text)',
+    'box-shadow:var(--custom-model-card-shadow)',
     'box-sizing:border-box',
   ].join(';');
 
@@ -1758,7 +1776,7 @@ function openCustomModelDialog(onChanged?: () => void): void {
   card.appendChild(title);
 
   const desc = document.createElement('p');
-  desc.style.cssText = 'margin:0 0 12px;color:#b8b8b8;font-size:12px;line-height:1.45;';
+  desc.style.cssText = 'margin:0 0 12px;color:var(--custom-model-desc);font-size:12px;line-height:1.45;';
   desc.textContent = 'Point at any OpenAI-compatible Responses API model. Name is optional; default uses the model key.';
   card.appendChild(desc);
 
@@ -1767,7 +1785,7 @@ function openCustomModelDialog(onChanged?: () => void): void {
 
   const makeField = (labelText: string, input: HTMLElement) => {
     const wrap = document.createElement('label');
-    wrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;font-size:12px;color:#cfcfcf;';
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--custom-model-label);';
     const lbl = document.createElement('span');
     lbl.textContent = labelText;
     lbl.style.cssText = 'opacity:0.9;';
@@ -1780,27 +1798,31 @@ function openCustomModelDialog(onChanged?: () => void): void {
   keyInput.type = 'text';
   keyInput.placeholder = 'gpt-4.1-mini';
   keyInput.required = true;
-  keyInput.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
+  keyInput.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid var(--custom-model-input-border);background:var(--custom-model-input-bg);color:var(--custom-model-input-text);box-sizing:border-box;width:100%;';
   form.appendChild(makeField('Model ID (as sent to the API)', keyInput));
 
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
   nameInput.placeholder = 'Display name (optional)';
-  nameInput.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
+  nameInput.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid var(--custom-model-input-border);background:var(--custom-model-input-bg);color:var(--custom-model-input-text);box-sizing:border-box;width:100%;';
   form.appendChild(makeField('Display name', nameInput));
 
   const providerSelect = document.createElement('select');
-  providerSelect.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
-  ['openai', 'anthropic'].forEach(p => {
+  providerSelect.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid var(--custom-model-input-border);background:var(--custom-model-input-bg);color:var(--custom-model-input-text);box-sizing:border-box;width:100%;';
+  [
+    { value: 'openai', label: 'OpenAI' },
+    { value: 'anthropic', label: 'Anthropic' },
+    { value: 'openai_compat', label: 'OpenAI-compatible' },
+  ].forEach(p => {
     const opt = document.createElement('option');
-    opt.value = p;
-    opt.textContent = p === 'openai' ? 'OpenAI-compatible' : 'Anthropic-compatible';
+    opt.value = p.value;
+    opt.textContent = p.label;
     providerSelect.appendChild(opt);
   });
   form.appendChild(makeField('Provider', providerSelect));
 
   const typeSelect = document.createElement('select');
-  typeSelect.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid #2d2d2d;background:#151515;color:#fff;box-sizing:border-box;width:100%;';
+  typeSelect.style.cssText = 'padding:8px 10px;border-radius:8px;border:1px solid var(--custom-model-input-border);background:var(--custom-model-input-bg);color:var(--custom-model-input-text);box-sizing:border-box;width:100%;';
   [
     { value: 'reasoning', label: 'Reasoning (default)' },
     { value: 'chat', label: 'Chat' },
@@ -1814,7 +1836,7 @@ function openCustomModelDialog(onChanged?: () => void): void {
   form.appendChild(makeField('Type', typeSelect));
 
   const errorEl = document.createElement('div');
-  errorEl.style.cssText = 'min-height:16px;color:#f6b0b0;font-size:12px;';
+  errorEl.style.cssText = 'min-height:16px;color:var(--custom-model-error);font-size:12px;';
   form.appendChild(errorEl);
 
   const actions = document.createElement('div');
@@ -1823,21 +1845,25 @@ function openCustomModelDialog(onChanged?: () => void): void {
   const cancelBtn = document.createElement('button');
   cancelBtn.type = 'button';
   cancelBtn.textContent = 'Cancel';
-  cancelBtn.style.cssText = 'padding:8px 12px;border-radius:8px;border:1px solid #333;background:#1a1a1a;color:#eaeaea;cursor:pointer;min-width:96px;';
+  cancelBtn.style.cssText = 'padding:8px 12px;border-radius:8px;border:1px solid var(--custom-model-btn-border);background:var(--custom-model-btn-bg);color:var(--custom-model-btn-text);cursor:pointer;min-width:96px;';
   cancelBtn.addEventListener('click', () => { overlay.remove(); restoreRightPane(); });
   actions.appendChild(cancelBtn);
 
   const saveBtn = document.createElement('button');
   saveBtn.type = 'submit';
   saveBtn.textContent = 'Save';
-  saveBtn.style.cssText = 'padding:8px 12px;border-radius:8px;border:1px solid #3a6ee8;background:#2554c7;color:#fff;cursor:pointer;min-width:110px;';
+  saveBtn.style.cssText = 'padding:8px 12px;border-radius:8px;border:1px solid var(--custom-model-primary-border);background:var(--custom-model-primary-bg);color:var(--custom-model-primary-text);cursor:pointer;min-width:110px;';
   actions.appendChild(saveBtn);
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const key = keyInput.value.trim();
     const name = nameInput.value.trim();
-    const provider = providerSelect.value === 'anthropic' ? 'anthropic' : 'openai';
+    const providerValue = providerSelect.value;
+    const provider: Provider =
+      providerValue === 'openai' || providerValue === 'anthropic' || providerValue === 'openai_compat'
+        ? providerValue
+        : 'openai';
     const type = typeSelect.value || 'reasoning';
     if (!key) {
       errorEl.textContent = 'Model key is required.';
@@ -1865,13 +1891,97 @@ function openCustomModelDialog(onChanged?: () => void): void {
   form.appendChild(actions);
   card.appendChild(form);
 
+  const hiddenToggleRow = document.createElement('label');
+  hiddenToggleRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin:2px 0 6px;font-size:12px;color:var(--custom-model-label);';
+  const hiddenToggle = document.createElement('input');
+  hiddenToggle.type = 'checkbox';
+  hiddenToggleRow.appendChild(hiddenToggle);
+  const hiddenToggleText = document.createElement('span');
+  hiddenToggleText.textContent = 'Show hidden models';
+  hiddenToggleRow.appendChild(hiddenToggleText);
+  card.appendChild(hiddenToggleRow);
+
+  const hiddenList = document.createElement('div');
+  hiddenList.style.cssText = 'display:none;flex-direction:column;gap:6px;max-height:min(24vh,180px);overflow:auto;margin-bottom:6px;';
+  card.appendChild(hiddenList);
+
+  const renderHiddenList = (entries: ModelMeta[]) => {
+    hiddenList.innerHTML = '';
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'color:var(--custom-model-muted);font-size:12px;';
+      empty.textContent = 'No hidden models.';
+      hiddenList.appendChild(empty);
+      return;
+    }
+    for (const m of entries) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid var(--custom-model-row-border);border-radius:8px;background:var(--custom-model-row-bg);';
+      const label = document.createElement('div');
+      label.style.cssText = 'display:flex;flex-direction:column;';
+      const title = document.createElement('span');
+      title.textContent = m.name || m.key;
+      title.style.cssText = 'font-size:13px;color:var(--custom-model-row-title);';
+      const meta = document.createElement('span');
+      meta.textContent = `${m.provider || 'openai'} · ${m.key}`;
+      meta.style.cssText = 'font-size:11px;color:var(--custom-model-row-meta);';
+      label.appendChild(title);
+      label.appendChild(meta);
+      row.appendChild(label);
+
+      const restore = document.createElement('button');
+      restore.type = 'button';
+      restore.textContent = 'Restore';
+      restore.style.cssText = 'padding:6px 10px;border-radius:8px;border:1px solid var(--custom-model-restore-border);background:var(--custom-model-restore-bg);color:var(--custom-model-restore-text);cursor:pointer;';
+      restore.addEventListener('click', async () => {
+        try {
+          const res = await window.ai?.models?.add?.({ key: m.key });
+          if (!res || !res.ok) {
+            showToast(res?.error || 'Failed to restore model', 'error');
+            return;
+          }
+          showToast('Model restored to picker', 'success');
+          onChanged?.();
+          const hiddenRes = await window.ai?.models?.hidden?.();
+          const hiddenEntries = Array.isArray(hiddenRes?.models) ? hiddenRes.models : [];
+          renderHiddenList(hiddenEntries as ModelMeta[]);
+        } catch (err: any) {
+          showToast(err?.message || 'Failed to restore model', 'error');
+        }
+      });
+      row.appendChild(restore);
+      hiddenList.appendChild(row);
+    }
+  };
+
+  hiddenToggle.addEventListener('change', async () => {
+    if (!hiddenToggle.checked) {
+      hiddenList.style.display = 'none';
+      return;
+    }
+    hiddenList.style.display = 'flex';
+    try {
+      const res = await window.ai?.models?.hidden?.();
+      if (!res || !res.ok) {
+        renderHiddenList([]);
+        showToast(res?.error || 'Failed to load hidden models', 'error');
+        return;
+      }
+      const entries = Array.isArray(res.models) ? res.models : [];
+      renderHiddenList(entries as ModelMeta[]);
+    } catch (err: any) {
+      renderHiddenList([]);
+      showToast(err?.message || 'Failed to load hidden models', 'error');
+    }
+  });
+
   const divider = document.createElement('div');
-  divider.style.cssText = 'border-top:1px solid #222;margin:14px -16px 10px;';
+  divider.style.cssText = 'border-top:1px solid var(--custom-model-divider);margin:14px -16px 10px;';
   card.appendChild(divider);
 
   const listTitle = document.createElement('div');
   listTitle.textContent = 'Custom models';
-  listTitle.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:8px;';
+  listTitle.style.cssText = 'font-size:13px;font-weight:600;margin-bottom:8px;color:var(--custom-model-card-text);';
   card.appendChild(listTitle);
 
   const list = document.createElement('div');
@@ -1879,21 +1989,21 @@ function openCustomModelDialog(onChanged?: () => void): void {
   const customs = modelsMeta.filter(m => m.source === 'custom');
   if (customs.length === 0) {
     const empty = document.createElement('div');
-    empty.style.cssText = 'color:#9a9a9a;font-size:12px;';
+    empty.style.cssText = 'color:var(--custom-model-muted);font-size:12px;';
     empty.textContent = 'No custom models yet.';
     list.appendChild(empty);
   } else {
     for (const m of customs) {
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid #1f1f1f;border-radius:8px;background:#131313;';
+      row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid var(--custom-model-row-border);border-radius:8px;background:var(--custom-model-row-bg);';
       const label = document.createElement('div');
       label.style.cssText = 'display:flex;flex-direction:column;';
       const title = document.createElement('span');
       title.textContent = m.name || m.key;
-      title.style.cssText = 'font-size:13px;color:#eaeaea;';
+      title.style.cssText = 'font-size:13px;color:var(--custom-model-row-title);';
       const meta = document.createElement('span');
       meta.textContent = `${m.provider || 'openai'} · ${m.key}`;
-      meta.style.cssText = 'font-size:11px;color:#a0a0a0;';
+      meta.style.cssText = 'font-size:11px;color:var(--custom-model-row-meta);';
       label.appendChild(title);
       label.appendChild(meta);
       row.appendChild(label);
@@ -1901,7 +2011,7 @@ function openCustomModelDialog(onChanged?: () => void): void {
       const del = document.createElement('button');
       del.type = 'button';
       del.textContent = 'Remove';
-      del.style.cssText = 'padding:6px 10px;border-radius:8px;border:1px solid #3a2424;background:#1f1313;color:#f2c3c3;cursor:pointer;';
+      del.style.cssText = 'padding:6px 10px;border-radius:8px;border:1px solid var(--custom-model-remove-border);background:var(--custom-model-remove-bg);color:var(--custom-model-remove-text);cursor:pointer;';
       del.addEventListener('click', async () => {
         try {
           const res = await window.ai?.models?.remove?.(m.key);
@@ -1967,12 +2077,23 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
     scrollContainer.className = 'model-list-scroll';
 
     for (const meta of modelsMeta) {
+      const row = document.createElement('div');
+      row.className = 'model-item-row';
+
       const btn = document.createElement('button');
-      btn.className = 'item';
+      btn.className = 'item model-item';
       btn.type = 'button';
       btn.setAttribute('role', 'menuitem');
       btn.setAttribute('data-value', meta.key);
-      btn.textContent = meta.name;
+      const label = document.createElement('span');
+      label.className = 'model-item-label';
+      label.textContent = meta.name;
+      btn.appendChild(label);
+      const selectionTick = document.createElement('span');
+      selectionTick.className = 'selection-tick';
+      selectionTick.setAttribute('aria-hidden', 'true');
+      selectionTick.textContent = '✓';
+      btn.appendChild(selectionTick);
       const lockedOut = lockedProvider && meta.provider && meta.provider !== lockedProvider;
       btn.disabled = lockedOut;
       if (lockedOut) {
@@ -1983,7 +2104,33 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
         btn.title = '';
       }
       btn.addEventListener('click', () => onSelect(meta.key));
-      scrollContainer.appendChild(btn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'model-item-remove';
+      removeBtn.setAttribute('aria-label', `Remove ${meta.name}`);
+      removeBtn.title = 'Remove model';
+      removeBtn.innerHTML = '<i data-lucide="Trash"></i>';
+      removeBtn.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!window.confirm(`Remove ${meta.name} from the model picker?`)) return;
+        try {
+          const res = await window.ai?.models?.remove?.(meta.key);
+          if (!res || !res.ok) {
+            showToast(res?.error || 'Failed to remove model', 'error');
+            return;
+          }
+          showToast('Model removed from picker', 'success');
+          await populateModelMenu(menu);
+        } catch (err: any) {
+          showToast(err?.message || 'Failed to remove model', 'error');
+        }
+      });
+
+      row.appendChild(btn);
+      row.appendChild(removeBtn);
+      scrollContainer.appendChild(row);
     }
     menu.appendChild(scrollContainer);
 
@@ -2001,6 +2148,10 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
     });
     footer.appendChild(addBtn);
     menu.appendChild(footer);
+
+    try {
+      createIcons({ icons: { Trash } });
+    } catch {}
 
     if (!modelsMeta.some(meta => meta.key === uiState.model)) {
       uiState.model = modelsMeta[0]?.key || uiState.model;
@@ -3139,7 +3290,12 @@ function normalizeStoredSession(entry: any): StoredChat | null {
   const title = typeof entry.title === 'string' && entry.title ? entry.title : 'New Chat';
   const createdAt = Number(entry.createdAt) || Date.now();
   const updatedAt = Number(entry.updatedAt) || createdAt;
-  const provider: Provider = (entry as any).provider === 'anthropic' ? 'anthropic' : 'openai';
+  const provider: Provider =
+    (entry as any).provider === 'anthropic'
+      ? 'anthropic'
+      : (entry as any).provider === 'openai_compat'
+        ? 'openai_compat'
+        : 'openai';
   const history = Array.isArray(entry.history) ? cloneHistory(entry.history) : [];
   const runtime = normalizeStoredRuntime((entry as any).runtime);
   const additionalWorkingDir = typeof entry.additionalWorkingDir === 'string' && entry.additionalWorkingDir ? entry.additionalWorkingDir : undefined;

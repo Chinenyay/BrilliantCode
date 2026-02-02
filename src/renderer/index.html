@@ -114,6 +114,37 @@
       --text-confirm-allow: #c7f9cc;
       --text-confirm-cancel: #f8c5c5;
 
+      /* Custom model modal */
+      --custom-model-overlay: rgba(0, 0, 0, 0.55);
+      --custom-model-card-bg: #0f0f10;
+      --custom-model-card-border: #2a2a2a;
+      --custom-model-card-text: #eaeaea;
+      --custom-model-card-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+      --custom-model-desc: #b8b8b8;
+      --custom-model-label: #cfcfcf;
+      --custom-model-input-bg: #151515;
+      --custom-model-input-border: #2d2d2d;
+      --custom-model-input-text: #ffffff;
+      --custom-model-error: #f6b0b0;
+      --custom-model-muted: #9a9a9a;
+      --custom-model-divider: #222222;
+      --custom-model-row-bg: #131313;
+      --custom-model-row-border: #1f1f1f;
+      --custom-model-row-title: #eaeaea;
+      --custom-model-row-meta: #a0a0a0;
+      --custom-model-btn-bg: #1a1a1a;
+      --custom-model-btn-border: #333333;
+      --custom-model-btn-text: #eaeaea;
+      --custom-model-primary-bg: #2554c7;
+      --custom-model-primary-border: #3a6ee8;
+      --custom-model-primary-text: #ffffff;
+      --custom-model-restore-bg: #142015;
+      --custom-model-restore-border: #2a3a2a;
+      --custom-model-restore-text: #c8f2c8;
+      --custom-model-remove-bg: #1f1313;
+      --custom-model-remove-border: #3a2424;
+      --custom-model-remove-text: #f2c3c3;
+
       /* Todo Panel */
       --text-todo-summary: #d0d0d0;
       --text-todo-icon: #9fb1c9;
@@ -235,6 +266,37 @@
       --text-confirm: #0f172a;
       --text-confirm-allow: #047857;
       --text-confirm-cancel: #dc2626;
+
+      /* Custom model modal */
+      --custom-model-overlay: rgba(248, 250, 252, 0.85);
+      --custom-model-card-bg: rgba(255, 255, 255, 0.9);
+      --custom-model-card-border: rgba(148, 163, 184, 0.4);
+      --custom-model-card-text: #0f172a;
+      --custom-model-card-shadow: 0 18px 48px rgba(15, 23, 42, 0.18);
+      --custom-model-desc: #64748b;
+      --custom-model-label: #334155;
+      --custom-model-input-bg: rgba(255, 255, 255, 0.9);
+      --custom-model-input-border: rgba(148, 163, 184, 0.5);
+      --custom-model-input-text: #0f172a;
+      --custom-model-error: #b91c1c;
+      --custom-model-muted: #94a3b8;
+      --custom-model-divider: rgba(148, 163, 184, 0.4);
+      --custom-model-row-bg: rgba(255, 255, 255, 0.75);
+      --custom-model-row-border: rgba(148, 163, 184, 0.35);
+      --custom-model-row-title: #0f172a;
+      --custom-model-row-meta: #64748b;
+      --custom-model-btn-bg: rgba(255, 255, 255, 0.7);
+      --custom-model-btn-border: rgba(148, 163, 184, 0.6);
+      --custom-model-btn-text: #1e293b;
+      --custom-model-primary-bg: #2563eb;
+      --custom-model-primary-border: #1d4ed8;
+      --custom-model-primary-text: #ffffff;
+      --custom-model-restore-bg: rgba(16, 185, 129, 0.12);
+      --custom-model-restore-border: rgba(16, 185, 129, 0.4);
+      --custom-model-restore-text: #047857;
+      --custom-model-remove-bg: rgba(239, 68, 68, 0.12);
+      --custom-model-remove-border: rgba(239, 68, 68, 0.4);
+      --custom-model-remove-text: #b91c1c;
 
       /* Todo Panel - glass effect */
       --text-todo-summary: #334155;
@@ -2701,6 +2763,16 @@
       gap: 6px;
     }
 
+    .selection-tick {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      line-height: 1;
+      color: var(--icon-tool-create-file);
+      flex: 0 0 auto;
+    }
+
     .seg-btn .icon {
       width: 16px;
       height: 16px;
@@ -2944,6 +3016,60 @@
       padding-top: 4px;
     }
 
+    #dd-model .model-item-row {
+      display: flex;
+      align-items: center;
+      gap: 0;
+    }
+
+    #dd-model .model-item {
+      flex: 1;
+      position: relative;
+      padding-right: 32px;
+    }
+
+    #dd-model .model-item-label {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #dd-model .model-item-remove {
+      width: 16px;
+      height: 16px;
+      border-radius: 0;
+      border: none;
+      background: transparent;
+      color: #ff8f8f;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      padding: 0;
+      margin: 0;
+      transition: color var(--transition-fast), opacity var(--transition-fast);
+    }
+
+    #dd-model .model-item-row:hover .model-item-remove,
+    #dd-model .model-item-row:focus-within .model-item-remove {
+      opacity: 1;
+      pointer-events: auto;
+      color: #ff8f8f;
+    }
+
+    #dd-model .model-item-remove:hover {
+      background: transparent;
+      color: #ff3b3b;
+    }
+
+    #dd-model .model-item-remove svg {
+      width: 14px;
+      height: 14px;
+      stroke: currentColor;
+    }
+
     .dropdown .item {
       display: block;
       width: 100%;
@@ -2958,6 +3084,20 @@
       cursor: pointer;
       transition: background var(--transition-fast);
       margin-bottom: 2px;
+      position: relative;
+      padding-right: 24px;
+    }
+
+    .dropdown .item .selection-tick {
+      display: none;
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    .dropdown .item.is-selected .selection-tick {
+      display: inline-flex;
     }
 
     .dropdown .item:hover {
@@ -5367,6 +5507,7 @@ body.theme-light .workspace-change-status.st-renamed { border-color: rgba(168, 8
                         <path d="M4 4h16v12H5.17L4 17.17V4zm2 2v8h12V6H6zm2 12h8v2H8z" />
                       </svg></span>
                     <span>Chat</span>
+                    <span class="selection-tick" aria-hidden="true">✓</span>
                   </button>
                   <button class="item" type="button" data-value="agent" role="menuitem">
                     <span class="icon"><svg viewBox="0 0 24 24">
@@ -5374,6 +5515,7 @@ body.theme-light .workspace-change-status.st-renamed { border-color: rgba(168, 8
                           d="M12 2a5 5 0 015 5v1h1a2 2 0 012 2v3a6 6 0 01-6 6h-4a6 6 0 01-6-6V10a2 2 0 012-2h1V7a5 5 0 015-5zm0 2a3 3 0 00-3 3v1h6V7a3 3 0 00-3-3z" />
                       </svg></span>
                     <span>Agent</span>
+                    <span class="selection-tick" aria-hidden="true">✓</span>
                   </button>
                   <button class="item" type="button" data-value="agent_full" role="menuitem">
                     <span class="icon"><svg viewBox="0 0 24 24">
@@ -5381,6 +5523,7 @@ body.theme-light .workspace-change-status.st-renamed { border-color: rgba(168, 8
                           d="M12 2a5 5 0 015 5v1h1a2 2 0 012 2v3a6 6 0 01-6 6h-4a6 6 0 01-6-6V10a2 2 0 012-2h1V7a5 5 0 015-5zM4 20l4-2 2 4H6a2 2 0 01-2-2z" />
                       </svg></span>
                     <span>Full Access</span>
+                    <span class="selection-tick" aria-hidden="true">✓</span>
                   </button>
                 </div>
               </div>
@@ -5407,10 +5550,22 @@ body.theme-light .workspace-change-status.st-renamed { border-color: rgba(168, 8
                   </span>
                 </button>
                 <div id="dd-reason" class="dropdown" role="menu" aria-label="Reasoning effort">
-                  <button class="item" type="button" data-value="low" role="menuitem"><span>Low</span></button>
-                  <button class="item" type="button" data-value="medium" role="menuitem"><span>Medium</span></button>
-                  <button class="item" type="button" data-value="high" role="menuitem"><span>High</span></button>
-                  <button class="item" type="button" data-value="xhigh" role="menuitem"><span>Extra High</span></button>
+                  <button class="item" type="button" data-value="low" role="menuitem">
+                    <span>Low</span>
+                    <span class="selection-tick" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="item" type="button" data-value="medium" role="menuitem">
+                    <span>Medium</span>
+                    <span class="selection-tick" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="item" type="button" data-value="high" role="menuitem">
+                    <span>High</span>
+                    <span class="selection-tick" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="item" type="button" data-value="xhigh" role="menuitem">
+                    <span>Extra High</span>
+                    <span class="selection-tick" aria-hidden="true">✓</span>
+                  </button>
                 </div>
               </div>
             </div>

@@ -450,7 +450,12 @@ async function readFileSafe(filePath: string): Promise<PersistedSessions> {
           .map((entry: Record<string, any>) => {
             const rawHistory = Array.isArray(entry.history) ? entry.history : [];
             // Migration: Default to 'openai' for sessions without provider field (backward compatibility)
-            const provider: Provider = entry.provider === 'anthropic' ? 'anthropic' : 'openai';
+            const provider: Provider =
+              entry.provider === 'anthropic'
+                ? 'anthropic'
+                : entry.provider === 'openai_compat'
+                  ? 'openai_compat'
+                  : 'openai';
             return {
               id: typeof entry.id === 'string' && entry.id ? entry.id : safeId(),
               title: sanitizeTitle(entry.title),

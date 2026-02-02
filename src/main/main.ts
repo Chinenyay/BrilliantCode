@@ -810,13 +810,40 @@ function attachWebviewDebugging(win: Electron.BrowserWindow, contents: Electron.
   });
 }
 
-// Intentionally left blank: response ids are tracked per-session inside AgentSession.
-
-// Persist a small settings blob so the chosen working folder survives restarts
-// (also used for a stable, non-PII prompt cache seed when unauthenticated).
 type CustomModelSetting = { key: string; name?: string; apiName?: string; provider?: Provider; type?: string };
-type AppSettings = { lastWorkingDir?: string; promptCacheSeed?: string; customModels?: CustomModelSetting[] };
+type AppSettings = {
+  lastWorkingDir?: string;
+  promptCacheSeed?: string;
+  customModels?: CustomModelSetting[];
+  hiddenModels?: string[];
+};
 let settingsPath = '';
+let hiddenModelKeys = new Set<string>();
+
+const buildModelList = (keys: string[]): { key: string; name: string; provider: Provider; type: string; source: 'builtin' | 'custom' }[] => {
+  return keys
+    .map(key => {
+      const model = MODELS[key];
+      if (!model) return null;
+      return {
+        key,
+        name: model.name,
+        provider: model.provider,
+        type: model.type,
+        source: isBuiltinModel(key) ? 'builtin' : 'custom',
+      };
+    })
+    .filter((entry): entry is { key: string; name: string; provider: Provider; type: string; source: 'builtin' | 'custom' } => Boolean(entry));
+};
+
+const listVisibleModels = (): { key: string; name: string; provider: Provider; type: string; source: 'builtin' | 'custom' }[] => {
+  const keys = Object.keys(MODELS).filter(key => !hiddenModelKeys.has(key));
+  return buildModelList(keys);
+};
+
+const listHiddenModels = (): { key: string; name: string; provider: Provider; type: string; source: 'builtin' | 'custom' }[] => {
+  return buildModelList([...hiddenModelKeys]);
+};
 async function loadSettings(): Promise<AppSettings> {
   try {
     settingsPath = path.join(app.getPath('userData'), 'settings.json');
@@ -846,10 +873,25 @@ async function getCustomModelsFromSettings(): Promise<CustomModelSetting[]> {
   }
 }
 
+async function getHiddenModelsFromSettings(): Promise<string[]> {
+  try {
+    const s = await loadSettings();
+    if (!Array.isArray(s.hiddenModels)) return [];
+    return s.hiddenModels.filter(key => typeof key === 'string' && key.trim());
+  } catch {
+    return [];
+  }
+}
+
 async function persistCustomModels(list: CustomModelSetting[]): Promise<void> {
   const current = await loadSettings();
   await saveSettings({ ...current, customModels: list });
   setCustomModels(list);
+}
+
+async function persistHiddenModels(list: string[]): Promise<void> {
+  const current = await loadSettings();
+  await saveSettings({ ...current, hiddenModels: list });
 }
 
 // Prompt caching (OpenAI Responses API): enable a stable prompt_cache_key and request
@@ -1002,9 +1044,19 @@ const withModelRequestGate = createRequestGate(MODEL_REQUEST_CONCURRENCY);
 const llmClient = (() => {
     const buildOpenAIClient = async (): Promise<OpenAI> => {
         const { key } = await apiKeys.getApiKey('openai');
-        const { url: baseUrl } = await apiKeys.getOpenAIBaseUrl();
         if (!key) {
             throw new Error('OpenAI API key is not configured. Use AI → API Keys… to set OPENAI_API_KEY.');
+        }
+        return new OpenAI({
+            apiKey: key,
+        });
+    };
+
+    const buildOpenAICompatClient = async (): Promise<OpenAI> => {
+        const { key } = await apiKeys.getApiKey('openai_compat');
+        const { url: baseUrl } = await apiKeys.getOpenAICompatBaseUrl();
+        if (!key) {
+            throw new Error('OpenAI-compatible API key is not configured. Use AI → API Keys… to set OPENAI_COMPAT_API_KEY.');
         }
         return new OpenAI({
             apiKey: key,
@@ -1023,8 +1075,12 @@ const llmClient = (() => {
         });
     };
 
-    const withFreshClient = async <T>(invoke: (client: OpenAI) => Promise<T> | T, retries = 1): Promise<T> => {
-        const client = await buildOpenAIClient();
+    const withFreshOpenAIClient = async <T>(
+        provider: 'openai' | 'openai_compat',
+        invoke: (client: OpenAI) => Promise<T> | T,
+        retries = 1
+    ): Promise<T> => {
+        const client = provider === 'openai_compat' ? await buildOpenAICompatClient() : await buildOpenAIClient();
         try {
             return await Promise.resolve(invoke(client));
         } catch (error: any) {
@@ -1065,9 +1121,11 @@ const llmClient = (() => {
 
                 // OpenAI: apply prompt caching best practices by default.
                 const enriched = await applyPromptCachingDefaults(params as any);
+                const openAiProvider: 'openai' | 'openai_compat' =
+                    provider === 'openai_compat' ? 'openai_compat' : 'openai';
 
                 try {
-                    const res = await withFreshClient(client => client.responses.create(enriched as any));
+                    const res = await withFreshOpenAIClient(openAiProvider, client => client.responses.create(enriched as any));
                     promptCachingSupported = promptCachingSupported ?? true;
                     return res as any;
                 } catch (error: any) {
@@ -1075,37 +1133,39 @@ const llmClient = (() => {
                         // Upstream rejected caching params. Disable for this app run and retry once.
                         promptCachingSupported = false;
                         const stripped = stripPromptCachingFields(enriched as any);
-                        return await withFreshClient(client => client.responses.create(stripped as any)) as any;
+                        return await withFreshOpenAIClient(openAiProvider, client => client.responses.create(stripped as any)) as any;
                     }
                     throw error;
                 }
             }),
             retrieve: (...args: ResponsesRetrieveArgs) => withModelRequestGate(() =>
-                withFreshClient(client => client.responses.retrieve(...args))
+                withFreshOpenAIClient('openai', client => client.responses.retrieve(...args))
             ),
             stream: (params: ResponsesStreamParams) => withModelRequestGate(async () => {
                 const modelName = (params as any)?.model || '';
                 const provider = getModelProvider(modelName);
                 if (provider === 'anthropic') {
                     // Anthropic streaming is not wired via Responses.stream.
-                    return await withFreshClient(client => client.responses.stream(params as any)) as any;
+                    return await withFreshOpenAIClient('openai', client => client.responses.stream(params as any)) as any;
                 }
 
                 const enriched = await applyPromptCachingDefaults(params as any);
+                const openAiProvider: 'openai' | 'openai_compat' =
+                    provider === 'openai_compat' ? 'openai_compat' : 'openai';
                 try {
-                    const res = await withFreshClient(client => client.responses.stream(enriched as any));
+                    const res = await withFreshOpenAIClient(openAiProvider, client => client.responses.stream(enriched as any));
                     promptCachingSupported = promptCachingSupported ?? true;
                     return res as any;
                 } catch (error: any) {
                     if (promptCachingSupported !== false && isPromptCachingParamError(error)) {
                         promptCachingSupported = false;
                         const stripped = stripPromptCachingFields(enriched as any);
-                        return await withFreshClient(client => client.responses.stream(stripped as any)) as any;
+                        return await withFreshOpenAIClient(openAiProvider, client => client.responses.stream(stripped as any)) as any;
                     }
                     throw error;
                 }
             }),
-            poll: (path: string) => withModelRequestGate(async () => withFreshClient(async client => {
+            poll: (path: string) => withModelRequestGate(async () => withFreshOpenAIClient('openai', async client => {
                 if (typeof path !== 'string' || !path.trim()) {
                     throw new Error('Invalid poll path');
                 }
@@ -1201,7 +1261,11 @@ ipcMain.handle('api-keys:status', async () => {
 
 ipcMain.handle('api-keys:set', async (_event: Electron.IpcMainInvokeEvent, payload: { provider?: string; apiKey?: string }) => {
   try {
-    const provider = payload?.provider === 'anthropic' ? 'anthropic' : 'openai';
+    const provider = payload?.provider === 'anthropic'
+      ? 'anthropic'
+      : payload?.provider === 'openai_compat'
+        ? 'openai_compat'
+        : 'openai';
     const apiKeyValue = typeof payload?.apiKey === 'string' ? payload.apiKey : '';
     await apiKeys.setApiKey(provider, apiKeyValue);
     return { ok: true };
@@ -1212,7 +1276,11 @@ ipcMain.handle('api-keys:set', async (_event: Electron.IpcMainInvokeEvent, paylo
 
 ipcMain.handle('api-keys:clear', async (_event: Electron.IpcMainInvokeEvent, payload: { provider?: string }) => {
   try {
-    const provider = payload?.provider === 'anthropic' ? 'anthropic' : 'openai';
+    const provider = payload?.provider === 'anthropic'
+      ? 'anthropic'
+      : payload?.provider === 'openai_compat'
+        ? 'openai_compat'
+        : 'openai';
     await apiKeys.setApiKey(provider, '');
     return { ok: true };
   } catch (error: any) {
@@ -1220,22 +1288,22 @@ ipcMain.handle('api-keys:clear', async (_event: Electron.IpcMainInvokeEvent, pay
   }
 });
 
-ipcMain.handle('api-keys:set-base-url', async (_event: Electron.IpcMainInvokeEvent, payload: { baseUrl?: string }) => {
+ipcMain.handle('api-keys:set-compat-base-url', async (_event: Electron.IpcMainInvokeEvent, payload: { baseUrl?: string }) => {
   try {
     const baseUrlValue = typeof payload?.baseUrl === 'string' ? payload.baseUrl : '';
-    await apiKeys.setOpenAIBaseUrl(baseUrlValue);
+    await apiKeys.setOpenAICompatBaseUrl(baseUrlValue);
     return { ok: true };
   } catch (error: any) {
-    return { ok: false, error: error?.message || 'Failed to save OpenAI base URL.' };
+    return { ok: false, error: error?.message || 'Failed to save OpenAI-compatible base URL.' };
   }
 });
 
-ipcMain.handle('api-keys:clear-base-url', async () => {
+ipcMain.handle('api-keys:clear-compat-base-url', async () => {
   try {
-    await apiKeys.setOpenAIBaseUrl('');
+    await apiKeys.setOpenAICompatBaseUrl('');
     return { ok: true };
   } catch (error: any) {
-    return { ok: false, error: error?.message || 'Failed to clear OpenAI base URL.' };
+    return { ok: false, error: error?.message || 'Failed to clear OpenAI-compatible base URL.' };
   }
 });
 
@@ -3180,6 +3248,13 @@ app.whenReady().then(async () => {
     console.warn('Failed to load custom models:', error);
   }
 
+  try {
+    const hidden = await getHiddenModelsFromSettings();
+    hiddenModelKeys = new Set(hidden);
+  } catch (error) {
+    console.warn('Failed to load hidden models:', error);
+  }
+
   await bootstrapApplication();
   while (pendingStartupOpenUrls.length) {
     pendingStartupOpenUrls.shift();
@@ -3732,16 +3807,18 @@ ipcMain.handle('ai:sessions:setWorkspaceChanges', async (
 
 ipcMain.handle('ai:models:list', async () => {
   try {
-    const models = Object.entries(MODELS).map(([key, model]) => ({
-      key,
-      name: model.name,
-      provider: model.provider,
-      type: model.type,
-      source: isBuiltinModel(key) ? 'builtin' : 'custom',
-    }));
-    return { ok: true, models };
+    return { ok: true, models: listVisibleModels() };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? 'Failed to list models');
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle('ai:models:hidden', async () => {
+  try {
+    return { ok: true, models: listHiddenModels() };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? 'Failed to list hidden models');
     return { ok: false, error: message };
   }
 });
@@ -3750,9 +3827,20 @@ ipcMain.handle('ai:models:add', async (_event: Electron.IpcMainInvokeEvent, payl
   try {
     const key = typeof payload?.key === 'string' ? payload.key.trim() : '';
     if (!key) return { ok: false, error: 'Model key is required.' };
-    if (isBuiltinModel(key)) return { ok: false, error: 'Built-in models cannot be overridden.' };
+    if (isBuiltinModel(key)) {
+      if (hiddenModelKeys.has(key)) {
+        hiddenModelKeys.delete(key);
+        await persistHiddenModels([...hiddenModelKeys]);
+      }
+      return { ok: true, models: listVisibleModels() };
+    }
 
-    const provider: Provider = payload?.provider === 'anthropic' ? 'anthropic' : 'openai';
+    const provider: Provider =
+      payload?.provider === 'anthropic'
+        ? 'anthropic'
+        : payload?.provider === 'openai_compat'
+          ? 'openai_compat'
+          : 'openai';
     const name = typeof payload?.name === 'string' && payload.name.trim() ? payload.name.trim() : key;
     const type = typeof payload?.type === 'string' && payload.type.trim() ? payload.type.trim() : 'reasoning';
 
@@ -3762,9 +3850,12 @@ ipcMain.handle('ai:models:add', async (_event: Electron.IpcMainInvokeEvent, payl
 
     await persistCustomModels(filtered);
 
-    return { ok: true, models: Object.entries(MODELS).map(([k, model]) => ({
-      key: k, name: model.name, provider: model.provider, type: model.type, source: isBuiltinModel(k) ? 'builtin' : 'custom',
-    })) };
+    if (hiddenModelKeys.has(key)) {
+      hiddenModelKeys.delete(key);
+      await persistHiddenModels([...hiddenModelKeys]);
+    }
+
+    return { ok: true, models: listVisibleModels() };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? 'Failed to add model');
     return { ok: false, error: message };
@@ -3775,16 +3866,22 @@ ipcMain.handle('ai:models:remove', async (_event: Electron.IpcMainInvokeEvent, p
   try {
     const key = typeof payload?.key === 'string' ? payload.key.trim() : '';
     if (!key) return { ok: false, error: 'Model key is required.' };
-    if (isBuiltinModel(key)) return { ok: false, error: 'Cannot remove built-in models.' };
+    if (isBuiltinModel(key)) {
+      hiddenModelKeys.add(key);
+      await persistHiddenModels([...hiddenModelKeys]);
+    } else {
+      const list = await getCustomModelsFromSettings();
+      const filtered = list.filter(m => m && m.key !== key);
 
-    const list = await getCustomModelsFromSettings();
-    const filtered = list.filter(m => m && m.key !== key);
+      await persistCustomModels(filtered);
 
-    await persistCustomModels(filtered);
+      if (hiddenModelKeys.has(key)) {
+        hiddenModelKeys.delete(key);
+        await persistHiddenModels([...hiddenModelKeys]);
+      }
+    }
 
-    return { ok: true, models: Object.entries(MODELS).map(([k, model]) => ({
-      key: k, name: model.name, provider: model.provider, type: model.type, source: isBuiltinModel(k) ? 'builtin' : 'custom',
-    })) };
+    return { ok: true, models: listVisibleModels() };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error ?? 'Failed to remove model');
     return { ok: false, error: message };
@@ -4091,7 +4188,7 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
     parent: parent ?? undefined,
     modal: !!parent,
     width: 540,
-    height: 420,
+    height: 520,
     resizable: false,
     title: 'API Keys',
     webPreferences: { contextIsolation: true, nodeIntegration: false, preload }
@@ -4105,8 +4202,10 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
     h1{font-size:16px;margin:0 0 8px}
     p{margin:0 0 12px;color:#bdbdbd}
     .row{margin:10px 0}
+    .section{border:1px solid #1f1f1f;border-radius:10px;padding:10px 12px;margin:12px 0;background:#0f0f0f}
+    .section-title{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#9a9a9a;margin:0 0 8px}
     label{display:flex;align-items:center;justify-content:space-between;font-size:11px;opacity:.95;margin-bottom:4px}
-    input{width:100%;padding:8px;border-radius:8px;border:1px solid #333;background:#111;color:#eee}
+    input, select{width:100%;padding:8px;border-radius:8px;border:1px solid #333;background:#111;color:#eee}
     .status{font-size:11px;color:#a0a0a0}
     .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
     button{padding:8px 12px;border-radius:8px;border:1px solid #444;background:#191919;color:#fff;cursor:pointer}
@@ -4121,22 +4220,32 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
   <h1>API Keys</h1>
   <p>Keys are stored in your OS keychain (via keytar). You can also use environment variables for development.</p>
 
-  <div class=row>
-    <label>OpenAI <span id=openaiStatus class=status></span></label>
-    <input id=openai placeholder="sk-…" autocomplete="off" />
-    <div class=hint>Env fallback: <code>OPENAI_API_KEY</code></div>
+  <div class=section>
+    <div class=section-title>Configured Keys</div>
+    <div id=configuredKeys></div>
+    <div id=configuredKeysEmpty class=hint>No keys configured yet.</div>
   </div>
 
-  <div class=row>
-    <label>OpenAI Base URL (optional) <span id=openaiBaseStatus class=status></span></label>
-    <input id=openaiBase placeholder="https://openrouter.ai/api/v1" autocomplete="off" />
-    <div class=hint>Env fallback: <code>OPENAI_BASE_URL</code> or <code>OPENAI_API_BASE</code>. Leave blank for api.openai.com</div>
-  </div>
-
-  <div class=row>
-    <label>Anthropic <span id=anthropicStatus class=status></span></label>
-    <input id=anthropic placeholder="sk-ant-…" autocomplete="off" />
-    <div class=hint>Env fallback: <code>ANTHROPIC_API_KEY</code></div>
+  <div class=section>
+    <div class=section-title>Add New API Key</div>
+    <div class=row>
+      <label for=provider>Provider</label>
+      <select id=provider>
+        <option value=openai>OpenAI</option>
+        <option value=openai_compat>OpenAI-compatible (custom provider)</option>
+        <option value=anthropic>Anthropic</option>
+      </select>
+    </div>
+    <div class=row>
+      <label id=apiKeyLabel>API Key</label>
+      <input id=apiKey placeholder="sk-…" autocomplete="off" />
+      <div id=apiKeyHint class=hint>Env fallback: <code>OPENAI_API_KEY</code></div>
+    </div>
+    <div class=row id=openaiCompatBaseRow>
+      <label>Base URL (optional)</label>
+      <input id=openaiCompatBase placeholder="https://openrouter.ai/api/v1" autocomplete="off" />
+      <div class=hint>For OpenAI-compatible providers. Leave blank for api.openai.com</div>
+    </div>
   </div>
 
   <div class=actions>
@@ -4150,15 +4259,45 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
     const $ = (id)=>document.getElementById(id);
     const msg = $('msg');
     const setMsg = (text, kind) => { msg.className = kind || 'error'; msg.textContent = text || ''; };
-    const setStatus = (el, st) => {
-      if (!el) return;
-      if (!st) { el.textContent = '—'; return; }
-      if (st.configured) {
-        const val = typeof st.value === 'string' && st.value.trim() ? st.value.trim() : null;
-        const suffix = st.source ? (' (' + st.source + ')') : '';
-        el.textContent = val ? (val + suffix) : ('configured' + suffix);
-      } else {
-        el.textContent = 'not configured';
+    const formatStatus = (st) => {
+      if (!st || !st.configured) return '';
+      const val = typeof st.value === 'string' && st.value.trim() ? st.value.trim() : null;
+      const suffix = st.source ? (' (' + st.source + ')') : '';
+      return val ? (val + suffix) : ('configured' + suffix);
+    };
+
+    const renderConfiguredKeys = (status) => {
+      const list = $('configuredKeys');
+      const empty = $('configuredKeysEmpty');
+      if (!list) return;
+      list.innerHTML = '';
+
+      const entries = [];
+      if (status && status.openai && status.openai.configured) {
+        entries.push({ label: 'OpenAI', status: status.openai });
+      }
+      if (status && status.openaiCompat && status.openaiCompat.configured) {
+        entries.push({ label: 'OpenAI-compatible', status: status.openaiCompat });
+      }
+      if (status && status.anthropic && status.anthropic.configured) {
+        entries.push({ label: 'Anthropic', status: status.anthropic });
+      }
+
+      for (const entry of entries) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        const label = document.createElement('label');
+        label.textContent = entry.label + ' ';
+        const span = document.createElement('span');
+        span.className = 'status';
+        span.textContent = formatStatus(entry.status);
+        label.appendChild(span);
+        row.appendChild(label);
+        list.appendChild(row);
+      }
+
+      if (empty) {
+        empty.style.display = entries.length ? 'none' : '';
       }
     };
 
@@ -4173,39 +4312,79 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
           setMsg((res && res.error) ? res.error : 'Failed to read key status', 'error');
           return;
         }
-        setStatus($('openaiStatus'), res.status && res.status.openai);
-        setStatus($('openaiBaseStatus'), res.status && res.status.openai && res.status.openai.baseUrl);
-        const baseVal = res.status && res.status.openai && res.status.openai.baseUrl && res.status.openai.baseUrl.value;
-        $('openaiBase').value = baseVal || '';
-        setStatus($('anthropicStatus'), res.status && res.status.anthropic);
+        renderConfiguredKeys(res.status);
+        const baseVal = res.status && res.status.openaiCompat && res.status.openaiCompat.baseUrl && res.status.openaiCompat.baseUrl.value;
+        $('openaiCompatBase').value = baseVal || '';
       } catch(e){
         setMsg(String(e && e.message || e || 'Failed to refresh status'), 'error');
       }
     }
 
+    const syncProviderUi = () => {
+      const raw = $('provider').value;
+      const provider = raw === 'anthropic' ? 'anthropic' : raw === 'openai_compat' ? 'openai_compat' : 'openai';
+      const baseRow = $('openaiCompatBaseRow');
+      const keyInput = $('apiKey');
+      const keyHint = $('apiKeyHint');
+      const keyLabel = $('apiKeyLabel');
+      if (provider === 'anthropic') {
+        baseRow.style.display = 'none';
+        keyInput.placeholder = 'sk-ant-…';
+        keyHint.innerHTML = 'Env fallback: <code>ANTHROPIC_API_KEY</code>';
+        keyLabel.textContent = 'Anthropic API Key';
+      } else if (provider === 'openai_compat') {
+        baseRow.style.display = '';
+        keyInput.placeholder = 'sk-…';
+        keyHint.innerHTML = 'Env fallback: <code>OPENAI_COMPAT_API_KEY</code>';
+        keyLabel.textContent = 'OpenAI-compatible API Key';
+      } else {
+        baseRow.style.display = 'none';
+        keyInput.placeholder = 'sk-…';
+        keyHint.innerHTML = 'Env fallback: <code>OPENAI_API_KEY</code>';
+        keyLabel.textContent = 'OpenAI API Key';
+      }
+    };
+
     $('close').addEventListener('click', ()=> window.close());
+    $('provider').addEventListener('change', syncProviderUi);
 
     $('save').addEventListener('click', async ()=>{
       try{
         setMsg('Saving…','error');
-        const openai = String($('openai').value||'').trim();
-        const openaiBase = String($('openaiBase').value||'').trim();
-        const anthropic = String($('anthropic').value||'').trim();
+        const raw = $('provider').value;
+        const provider = raw === 'anthropic' ? 'anthropic' : raw === 'openai_compat' ? 'openai_compat' : 'openai';
+        const apiKey = String($('apiKey').value||'').trim();
+        const openaiCompatBase = String($('openaiCompatBase').value||'').trim();
 
-        if (openai) {
-          const r = await window.apiKeys.set('openai', openai);
+        if (provider === 'anthropic') {
+          if (!apiKey) {
+            setMsg('Enter an Anthropic API key to save.','error');
+            return;
+          }
+          const r = await window.apiKeys.set('anthropic', apiKey);
+          if (!r || !r.ok) throw new Error((r && r.error) ? r.error : 'Failed to save Anthropic key');
+        } else if (provider === 'openai_compat') {
+          if (!apiKey && !openaiCompatBase) {
+            setMsg('Enter an OpenAI-compatible API key or base URL to save.','error');
+            return;
+          }
+          if (apiKey) {
+            const r = await window.apiKeys.set('openai_compat', apiKey);
+            if (!r || !r.ok) throw new Error((r && r.error) ? r.error : 'Failed to save OpenAI-compatible key');
+          }
+          const rBase = await window.apiKeys.setCompatBaseUrl(openaiCompatBase);
+          if (!rBase || !rBase.ok) throw new Error((rBase && rBase.error) ? rBase.error : 'Failed to save OpenAI-compatible base URL');
+        } else {
+          if (!apiKey) {
+            setMsg('Enter an OpenAI API key to save.','error');
+            return;
+          }
+          const r = await window.apiKeys.set('openai', apiKey);
           if (!r || !r.ok) throw new Error((r && r.error) ? r.error : 'Failed to save OpenAI key');
         }
-        const rBase = await window.apiKeys.setBaseUrl(openaiBase);
-        if (!rBase || !rBase.ok) throw new Error((rBase && rBase.error) ? rBase.error : 'Failed to save OpenAI base URL');
-        if (anthropic) {
-          const r = await window.apiKeys.set('anthropic', anthropic);
-          if (!r || !r.ok) throw new Error((r && r.error) ? r.error : 'Failed to save Anthropic key');
-        }
 
-        $('openai').value='';
-        $('openaiBase').value=openaiBase;
-        $('anthropic').value='';
+        $('apiKey').value='';
+        $('openaiCompatBase').value=openaiCompatBase;
         setMsg('Saved.','ok');
         await refresh();
       } catch(e){
@@ -4218,8 +4397,10 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
         setMsg('Clearing…','error');
         const r1 = await window.apiKeys.clear('openai');
         if (!r1 || !r1.ok) throw new Error((r1 && r1.error) ? r1.error : 'Failed to clear OpenAI key');
-        const rBase = await window.apiKeys.clearBaseUrl();
-        if (!rBase || !rBase.ok) throw new Error((rBase && rBase.error) ? rBase.error : 'Failed to clear OpenAI base URL');
+        const rCompat = await window.apiKeys.clear('openai_compat');
+        if (!rCompat || !rCompat.ok) throw new Error((rCompat && rCompat.error) ? rCompat.error : 'Failed to clear OpenAI-compatible key');
+        const rBase = await window.apiKeys.clearCompatBaseUrl();
+        if (!rBase || !rBase.ok) throw new Error((rBase && rBase.error) ? rBase.error : 'Failed to clear OpenAI-compatible base URL');
         const r2 = await window.apiKeys.clear('anthropic');
         if (!r2 || !r2.ok) throw new Error((r2 && r2.error) ? r2.error : 'Failed to clear Anthropic key');
         setMsg('Cleared stored keys.','ok');
@@ -4229,6 +4410,7 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
       }
     });
 
+    syncProviderUi();
     void refresh();
   </script>`;
 

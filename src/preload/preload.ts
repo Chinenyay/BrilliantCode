@@ -78,16 +78,16 @@ contextBridge.exposeInMainWorld('pty', {
 });
 
 contextBridge.exposeInMainWorld('apiKeys', {
-  status: (): Promise<{ ok: boolean; status?: { openai: { configured: boolean; source: 'keytar' | 'env' | null; baseUrl: { configured: boolean; source: 'keytar' | 'env' | null; value?: string } }; anthropic: { configured: boolean; source: 'keytar' | 'env' | null } }; error?: string }> =>
+  status: (): Promise<{ ok: boolean; status?: { openai: { configured: boolean; source: 'keytar' | 'env' | null }; openaiCompat: { configured: boolean; source: 'keytar' | 'env' | null; baseUrl: { configured: boolean; source: 'keytar' | 'env' | null; value?: string } }; anthropic: { configured: boolean; source: 'keytar' | 'env' | null } }; error?: string }> =>
     ipcRenderer.invoke('api-keys:status'),
-  set: (provider: 'openai' | 'anthropic', apiKey: string): Promise<{ ok: boolean; error?: string }> =>
+  set: (provider: 'openai' | 'openai_compat' | 'anthropic', apiKey: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('api-keys:set', { provider, apiKey }),
-  clear: (provider: 'openai' | 'anthropic'): Promise<{ ok: boolean; error?: string }> =>
+  clear: (provider: 'openai' | 'openai_compat' | 'anthropic'): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('api-keys:clear', { provider }),
-  setBaseUrl: (baseUrl: string): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('api-keys:set-base-url', { baseUrl }),
-  clearBaseUrl: (): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('api-keys:clear-base-url'),
+  setCompatBaseUrl: (baseUrl: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('api-keys:set-compat-base-url', { baseUrl }),
+  clearCompatBaseUrl: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('api-keys:clear-compat-base-url'),
   showDialog: (): void => ipcRenderer.send('api-keys:show-dialog'),
 });
 
@@ -256,7 +256,8 @@ contextBridge.exposeInMainWorld("ai", {
   },
   models: {
     list: (): Promise<{ ok: boolean; models?: any[]; error?: string }> => ipcRenderer.invoke('ai:models:list'),
-    add: (payload: { key: string; name?: string; provider?: 'openai' | 'anthropic'; type?: string }): Promise<{ ok: boolean; models?: any[]; error?: string }> =>
+    hidden: (): Promise<{ ok: boolean; models?: any[]; error?: string }> => ipcRenderer.invoke('ai:models:hidden'),
+    add: (payload: { key: string; name?: string; provider?: 'openai' | 'openai_compat' | 'anthropic'; type?: string }): Promise<{ ok: boolean; models?: any[]; error?: string }> =>
       ipcRenderer.invoke('ai:models:add', payload),
     remove: (key: string): Promise<{ ok: boolean; models?: any[]; error?: string }> =>
       ipcRenderer.invoke('ai:models:remove', { key }),

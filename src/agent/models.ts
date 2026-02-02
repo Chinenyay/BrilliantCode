@@ -1,5 +1,5 @@
 // Model metadata that drives both UI selection and API routing.
-export type Provider = 'openai' | 'anthropic';
+export type Provider = 'openai' | 'openai_compat' | 'anthropic';
 
 export type Model = {
   name: string; // Display name shown in the UI
@@ -65,6 +65,10 @@ export const OPENAI_MODELS: Record<string, Model> = {
   }
 };
 
+// OpenAI-compatible models (local or third-party endpoints)
+export const OPENAI_COMPAT_MODELS: Record<string, Model> = {
+};
+
 export const ANTHROPIC_MODELS: Record<string, Model> = {
   'claude-opus-4.5': {
     name: 'claude-opus-4.5',
@@ -92,10 +96,15 @@ export const ANTHROPIC_MODELS: Record<string, Model> = {
 
 export const MODELS: Record<string, Model> = {
   ...OPENAI_MODELS,
+  ...OPENAI_COMPAT_MODELS,
   ...ANTHROPIC_MODELS
 };
 
-const BUILTIN_MODEL_KEYS = new Set(Object.keys(OPENAI_MODELS).concat(Object.keys(ANTHROPIC_MODELS)));
+const BUILTIN_MODEL_KEYS = new Set(
+  Object.keys(OPENAI_MODELS)
+    .concat(Object.keys(OPENAI_COMPAT_MODELS))
+    .concat(Object.keys(ANTHROPIC_MODELS))
+);
 let customModels: Record<string, Model> = {};
 
 export function isBuiltinModel(key: string): boolean {
@@ -110,7 +119,10 @@ export function setCustomModels(list: CustomModelInput[] | undefined | null): vo
       const key = typeof raw.key === 'string' ? raw.key.trim() : '';
       if (!key) continue;
       if (isBuiltinModel(key)) continue;
-      const provider: Provider = raw.provider === 'anthropic' ? 'anthropic' : 'openai';
+      let provider: Provider = 'openai_compat';
+      if (raw.provider === 'anthropic') provider = 'anthropic';
+      else if (raw.provider === 'openai') provider = 'openai';
+      else if (raw.provider === 'openai_compat') provider = 'openai_compat';
       const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : key;
       const apiName = typeof raw.apiName === 'string' && raw.apiName.trim() ? raw.apiName.trim() : undefined;
       const type = typeof raw.type === 'string' && raw.type.trim() ? raw.type.trim() : 'reasoning';
@@ -131,7 +143,7 @@ export function setCustomModels(list: CustomModelInput[] | undefined | null): vo
   for (const key of Object.keys(MODELS)) {
     delete (MODELS as any)[key];
   }
-  Object.assign(MODELS, { ...OPENAI_MODELS, ...ANTHROPIC_MODELS, ...customModels });
+  Object.assign(MODELS, { ...OPENAI_MODELS, ...OPENAI_COMPAT_MODELS, ...ANTHROPIC_MODELS, ...customModels });
 }
 
 export function getCustomModels(): Record<string, Model> {
@@ -152,7 +164,7 @@ export function getModelProvider(modelName: string): Provider {
   const model = MODELS[modelName];
   if (!model) {
     if (modelName.startsWith('claude-')) return 'anthropic';
-    return 'openai';
+    return 'openai_compat';
   }
   return model.provider;
 }
