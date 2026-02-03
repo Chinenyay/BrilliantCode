@@ -2,6 +2,8 @@ import { supportsReasoning, getModelProvider, supportsExtendedThinking, type Pro
 import { listDirTree } from './dirTree.js';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { jsonrepair } from 'jsonrepair';
 import { ChatStore, type StoredChat, type AnthropicConversationItem } from './chatStore.js';
 import type { OpenAIResponseItem, OpenAIUserContent } from '../types/chat.js';
@@ -87,6 +89,27 @@ const parseEnvMs = (keys: string[], fallback: number): number => {
   return fallback;
 };
 
+const parseEnvInt = (keys: string[], fallback: number): number => {
+  for (const key of keys) {
+    const val = process.env[key]?.trim();
+    if (val) {
+      const parsed = Number(val);
+      if (Number.isFinite(parsed)) return Math.floor(parsed);
+    }
+  }
+  return fallback;
+};
+
+const parseEnvBool = (keys: string[], fallback: boolean): boolean => {
+  for (const key of keys) {
+    const val = process.env[key]?.trim();
+    if (!val) continue;
+    if (/^(1|true|yes|on)$/i.test(val)) return true;
+    if (/^(0|false|no|off)$/i.test(val)) return false;
+  }
+  return fallback;
+};
+
 const RETRY_BUDGET_MS = parseEnvMs(['AGENT_RETRY_MAX_MS', 'AGENT_RETRY_MAX_DURATION_MS'], 5 * 60 * 1000);
 const RETRY_BASE_DELAY_MS = parseEnvMs(['AGENT_RETRY_BASE_DELAY_MS'], 1_000);
 const RETRY_MAX_DELAY_MS = parseEnvMs(['AGENT_RETRY_MAX_DELAY_MS'], 60_000);
@@ -95,6 +118,22 @@ const RATE_LIMIT_MAX_DELAY_MS = parseEnvMs(['AGENT_RATE_LIMIT_MAX_MS'], 60_000);
 const RESPONSE_POLL_TIMEOUT_MS = parseEnvMs(['AGENT_RESPONSE_POLL_TIMEOUT_MS'], 0);
 
 const TOOL_PREVIEW_LIMIT = 2_000;
+
+const TOOL_IMAGE_MAX_DIM = parseEnvInt(['BRILLIANTCODE_TOOL_IMAGE_MAX_DIM', 'BC_TOOL_IMAGE_MAX_DIM'], 768);
+const TOOL_IMAGE_MAX_BYTES = parseEnvInt(['BRILLIANTCODE_TOOL_IMAGE_MAX_BYTES', 'BC_TOOL_IMAGE_MAX_BYTES'], 350_000);
+const TOOL_IMAGE_DOWNSCALE = parseEnvBool(['BRILLIANTCODE_TOOL_IMAGE_DOWNSCALE', 'BC_TOOL_IMAGE_DOWNSCALE'], true);
+const TOOL_TEXT_MAX_CHARS = parseEnvInt(['BRILLIANTCODE_TOOL_TEXT_MAX_CHARS', 'BC_TOOL_TEXT_MAX_CHARS'], 4000);
+const TOOL_LINK_MAX = parseEnvInt(['BRILLIANTCODE_TOOL_LINK_MAX', 'BC_TOOL_LINK_MAX'], 20);
+const TOOL_IMAGE_DIR = path.join(os.tmpdir(), 'brilliantcode', 'tool-images');
+
+const REQUEST_IMAGE_MAX_CHARS = parseEnvInt(
+  ['BRILLIANTCODE_IMAGE_REQUEST_MAX_CHARS', 'BC_IMAGE_REQUEST_MAX_CHARS'],
+  Math.max(250_000, Math.round(TOOL_IMAGE_MAX_BYTES * 1.6))
+);
+const PERSIST_IMAGE_MAX_CHARS = parseEnvInt(['BRILLIANTCODE_IMAGE_PERSIST_MAX_CHARS', 'BC_IMAGE_PERSIST_MAX_CHARS'], 20_000);
+
+const TRANSIENT_ITEM_FLAG = '_bc_transient';
+const TRANSIENT_USED_FLAG = '_bc_transient_used';
 
 // ============================================================================
 // Utility Functions
@@ -114,6 +153,232 @@ const safeStringify = (val: any): string => {
 const clampString = (str: string, limit: number): string => {
   if (str.length <= limit) return str;
   return `${str.slice(0, limit)}… (truncated)`;
+};
+
+const isBase64DataUrl = (value: string): boolean => /^data:[^;]+;base64,/i.test(value);
+
+const looksLikeBareBase64 = (value: string): boolean => {
+  if (!value || value.length < 2000) return false;
+  return /^[A-Za-z0-9+/=\s]+$/.test(value);
+};
+
+const imagePlaceholder = (label?: string): string => {
+  const base = '[image omitted]';
+  return label ? `${base} ${label}` : base;
+};
+
+const normalizeBase64Input = (raw: string, fallbackMime: string): { base64: string; mime: string } => {
+  if (isBase64DataUrl(raw)) {
+    const match = raw.match(/^data:([^;]+);base64,(.*)$/i);
+    if (match) {
+      return { mime: match[1] || fallbackMime, base64: match[2] || '' };
+    }
+  }
+  return { mime: fallbackMime, base64: raw };
+};
+
+let cachedNativeImage: any | null | undefined;
+const getNativeImage = async (): Promise<any | null> => {
+  if (cachedNativeImage !== undefined) return cachedNativeImage;
+  try {
+    const mod = await import('electron');
+    cachedNativeImage = (mod as any).nativeImage ?? null;
+  } catch {
+    cachedNativeImage = null;
+  }
+  return cachedNativeImage;
+};
+
+const resizeToMaxDim = (img: any, maxDim: number): any => {
+  if (!img || !maxDim) return img;
+  const size = img.getSize?.();
+  if (!size || !size.width || !size.height) return img;
+  if (size.width <= maxDim && size.height <= maxDim) return img;
+  const scale = maxDim / Math.max(size.width, size.height);
+  const width = Math.max(1, Math.floor(size.width * scale));
+  const height = Math.max(1, Math.floor(size.height * scale));
+  return img.resize({ width, height, quality: 'good' });
+};
+
+const encodeImageBuffer = (img: any): { buffer: Buffer; mime: string } => {
+  if (!img || typeof img.toPNG !== 'function') {
+    return { buffer: Buffer.alloc(0), mime: 'image/png' };
+  }
+  const png = img.toPNG();
+  let buffer = png;
+  let mime = 'image/png';
+  if (TOOL_IMAGE_MAX_BYTES > 0 && png.length > TOOL_IMAGE_MAX_BYTES && typeof img.toJPEG === 'function') {
+    const jpg = img.toJPEG(80);
+    if (jpg.length < png.length) {
+      buffer = jpg;
+      mime = 'image/jpeg';
+    }
+  }
+  return { buffer, mime };
+};
+
+const buildModelImageData = (img: any, fallback: { buffer: Buffer; mime: string }, maxBytes: number): { dataUrl: string; mime: string; bytes: number; width?: number; height?: number } | null => {
+  if (!maxBytes || maxBytes <= 0) return null;
+  let width: number | undefined;
+  let height: number | undefined;
+  let buffer = fallback.buffer;
+  let mime = fallback.mime;
+
+  if (img && typeof img.toJPEG === 'function') {
+    const size = img.getSize?.();
+    width = size?.width;
+    height = size?.height;
+    let working = img;
+    let modelBuffer = working.toJPEG(70);
+    if (modelBuffer.length > maxBytes && TOOL_IMAGE_MAX_DIM > 0 && TOOL_IMAGE_DOWNSCALE) {
+      const scale = Math.max(0.25, Math.sqrt(maxBytes / modelBuffer.length));
+      const targetDim = Math.max(64, Math.floor(Math.max(width || TOOL_IMAGE_MAX_DIM, height || TOOL_IMAGE_MAX_DIM) * scale));
+      working = resizeToMaxDim(working, targetDim);
+      const resized = working.getSize?.();
+      width = resized?.width ?? width;
+      height = resized?.height ?? height;
+      modelBuffer = working.toJPEG(60);
+    }
+    if (modelBuffer.length <= maxBytes) {
+      buffer = modelBuffer;
+      mime = 'image/jpeg';
+    }
+  }
+
+  if (buffer.length > maxBytes) return null;
+  if (!buffer.length) return null;
+  const base64 = buffer.toString('base64');
+  const dataUrl = `data:${mime};base64,${base64}`;
+  if (dataUrl.length > REQUEST_IMAGE_MAX_CHARS) return null;
+  return { dataUrl, mime, bytes: buffer.length, width, height };
+};
+
+const ensureToolImageDir = async (): Promise<void> => {
+  try {
+    await fs.mkdir(TOOL_IMAGE_DIR, { recursive: true });
+  } catch { }
+};
+
+const imageExtForMime = (mime: string): string => {
+  const m = mime.toLowerCase();
+  if (m.includes('jpeg') || m.includes('jpg')) return 'jpg';
+  if (m.includes('webp')) return 'webp';
+  if (m.includes('gif')) return 'gif';
+  return 'png';
+};
+
+const writeToolImageFile = async (buffer: Buffer, mime: string, label: string): Promise<{ path?: string; bytes: number }> => {
+  const bytes = buffer.length;
+  try {
+    await ensureToolImageDir();
+    const ext = imageExtForMime(mime);
+    const id = (() => {
+      try { return randomUUID(); } catch { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+    })();
+    const filename = `${label}-${id}.${ext}`;
+    const filePath = path.join(TOOL_IMAGE_DIR, filename);
+    await fs.writeFile(filePath, buffer);
+    return { path: filePath, bytes };
+  } catch {
+    return { path: undefined, bytes };
+  }
+};
+
+const clampToolText = (value: any): { text?: string; truncated: boolean } => {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return { text: undefined, truncated: false };
+  if (raw.length <= TOOL_TEXT_MAX_CHARS) return { text: raw, truncated: false };
+  return { text: `${raw.slice(0, TOOL_TEXT_MAX_CHARS)}...`, truncated: true };
+};
+
+const clampToolLinks = (value: any): { links?: Array<{ text: string; href?: string }>; total: number; truncated: boolean } => {
+  if (!Array.isArray(value)) return { links: undefined, total: 0, truncated: false };
+  const total = value.length;
+  const truncated = value.length > TOOL_LINK_MAX;
+  const links = value.slice(0, TOOL_LINK_MAX).map((entry: any) => ({
+    text: clampString(typeof entry?.text === 'string' ? entry.text : '', 200),
+    href: typeof entry?.href === 'string' ? entry.href : undefined,
+  }));
+  return { links, total, truncated };
+};
+
+const scrubOpenAIUserContent = (content: any, maxChars: number): any => {
+  if (!Array.isArray(content)) return content;
+  const out: any[] = [];
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue;
+    if ((part as any).type === 'input_image') {
+      const url = typeof (part as any).image_url === 'string' ? String((part as any).image_url) : '';
+      const shouldOmit =
+        (url && isBase64DataUrl(url) && url.length > maxChars)
+        || (url && looksLikeBareBase64(url) && url.length > maxChars);
+      if (shouldOmit) {
+        const filename = typeof (part as any).filename === 'string' ? String((part as any).filename) : '';
+        out.push({ type: 'input_text', text: imagePlaceholder(filename ? `(${filename})` : undefined) });
+        continue;
+      }
+    }
+    out.push(part);
+  }
+  if (!out.some(p => p && typeof p === 'object' && (p as any).type === 'input_text')) {
+    out.unshift({ type: 'input_text', text: '' });
+  }
+  return out;
+};
+
+const buildOpenAIRequestMessages = (history: OpenAIResponseItem[]): OpenAIResponseItem[] => {
+  const messages: OpenAIResponseItem[] = [];
+  for (const item of history) {
+    if (!item || typeof item !== 'object') continue;
+    if ((item as any)[TRANSIENT_USED_FLAG]) continue;
+    const isTransient = (item as any)[TRANSIENT_ITEM_FLAG] === true;
+    if (isTransient) {
+      (item as any)[TRANSIENT_USED_FLAG] = true;
+    }
+    const { display_text, _bc_transient, _bc_transient_used, ...rest } = item as any;
+    const clone = rest as OpenAIResponseItem;
+    if (clone.role === 'user' && Array.isArray(clone.content)) {
+      const allowLarge = isTransient;
+      clone.content = allowLarge ? clone.content : scrubOpenAIUserContent(clone.content, REQUEST_IMAGE_MAX_CHARS);
+    }
+    if (clone.type === 'function_call_output' && typeof (clone as any).output !== 'string') {
+      (clone as any).output = safeStringify((clone as any).output);
+    }
+    messages.push(clone);
+  }
+  return messages;
+};
+
+const buildPersistableOpenAIHistory = (history: OpenAIResponseItem[]): OpenAIResponseItem[] => {
+  const out: OpenAIResponseItem[] = [];
+  for (const item of history) {
+    if (!item || typeof item !== 'object') continue;
+    if ((item as any)[TRANSIENT_ITEM_FLAG]) continue;
+    const clone = cloneDeep(item);
+    if (clone.role === 'user' && Array.isArray(clone.content)) {
+      clone.content = scrubOpenAIUserContent(clone.content, PERSIST_IMAGE_MAX_CHARS);
+    }
+    if (clone.type === 'function_call_output' && typeof (clone as any).output !== 'string') {
+      (clone as any).output = safeStringify((clone as any).output);
+    }
+    delete (clone as any)[TRANSIENT_ITEM_FLAG];
+    delete (clone as any)[TRANSIENT_USED_FLAG];
+    out.push(clone);
+  }
+  return out;
+};
+
+const cleanupUsedTransients = (history: OpenAIResponseItem[]): OpenAIResponseItem[] => {
+  let changed = false;
+  const next = history.filter(item => {
+    if (!item || typeof item !== 'object') return true;
+    if ((item as any)[TRANSIENT_USED_FLAG]) {
+      changed = true;
+      return false;
+    }
+    return true;
+  });
+  return changed ? next : history;
 };
 
 let anthropicCacheControlSupported: boolean | null = null;
@@ -1579,11 +1844,7 @@ export class AgentSession {
     opts?: RunOpts
   ): Promise<{ toolCalled: boolean; history: OpenAIResponseItem[] }> {
     // Build messages with system prompt
-    let messages = history.map((item) => {
-      if (!item || typeof item !== 'object') return item;
-      const { display_text, ...rest } = item as any;
-      return rest as OpenAIResponseItem;
-    });
+    let messages = buildOpenAIRequestMessages(history);
     // Prompt caching best practice: keep a stable developer prefix, and send the
     // dynamic workspace context (dir tree, AGENTS.md, etc.) as a separate message.
     const staticPrompt = this.systemPromptStatic;
@@ -1987,20 +2248,90 @@ export class AgentSession {
         ac.signal
       );
 
-      // Special handling for screenshot_preview/visit_url - convert to input_image format
       if ((toolName === 'screenshot_preview' || toolName === 'visit_url') && data?.data) {
-        const mime = data.mime || 'image/png';
-        const imageData = data.data;
+        const fallbackMime = typeof data?.mime === 'string' && data.mime.trim() ? data.mime : 'image/png';
+        const rawData = typeof data?.data === 'string' ? data.data : '';
+        const { base64, mime } = normalizeBase64Input(rawData, fallbackMime);
+        const buffer = Buffer.from(base64 || '', 'base64');
+
+        const nativeImage = await getNativeImage();
+        let img: any | null = null;
+        let width: number | undefined;
+        let height: number | undefined;
+        if (nativeImage && buffer.length) {
+          try {
+            img = nativeImage.createFromBuffer(buffer);
+          } catch {
+            img = null;
+          }
+        }
+
+        if (img && typeof img.isEmpty === 'function' && img.isEmpty()) {
+          img = null;
+        }
+
+        if (img) {
+          const size = img.getSize?.();
+          width = size?.width;
+          height = size?.height;
+          if (TOOL_IMAGE_DOWNSCALE && TOOL_IMAGE_MAX_DIM > 0) {
+            img = resizeToMaxDim(img, TOOL_IMAGE_MAX_DIM);
+            const resized = img.getSize?.();
+            width = resized?.width ?? width;
+            height = resized?.height ?? height;
+          }
+        }
+
+        const encoded = img ? encodeImageBuffer(img) : { buffer, mime };
+        const fileInfo = await writeToolImageFile(encoded.buffer, encoded.mime, toolName);
+        const textInfo = toolName === 'visit_url' ? clampToolText(data?.text) : { text: undefined, truncated: false };
+        const linkInfo = toolName === 'visit_url' ? clampToolLinks(data?.links) : { links: undefined, total: 0, truncated: false };
+
+        const meta: Record<string, any> = {
+          ok: true,
+          kind: toolName === 'visit_url' ? 'visit_url' : 'screenshot',
+          path: fileInfo.path ?? null,
+          mime: encoded.mime,
+          bytes: fileInfo.bytes,
+          width,
+          height,
+        };
+        if (toolName === 'visit_url') {
+          if (typeof data?.url === 'string' && data.url.trim()) meta.url = data.url.trim();
+          if (textInfo.text) meta.text = textInfo.text;
+          if (textInfo.truncated) meta.text_truncated = true;
+          if (linkInfo.links) meta.links = linkInfo.links;
+          if (linkInfo.total) meta.link_count = linkInfo.total;
+          if (linkInfo.truncated) meta.links_truncated = true;
+        }
 
         history.push({
           type: 'function_call_output',
           call_id: callId,
-          output: [{
-            type: 'input_image',
-            image_url: `data:${mime};base64,${imageData}`,
-            filename: data.filename
-          }]
+          output: safeStringify(meta)
         } as OpenAIResponseItem);
+
+        const modelImage = buildModelImageData(img, encoded, TOOL_IMAGE_MAX_BYTES);
+        if (modelImage) {
+          const label = toolName === 'visit_url'
+            ? `Screenshot of ${meta.url || 'visited page'}`
+            : 'Screenshot from preview';
+          const transientItem: OpenAIResponseItem = {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: label },
+              {
+                type: 'input_image',
+                image_url: modelImage.dataUrl,
+                mime_type: modelImage.mime,
+                detail: 'low',
+                filename: typeof data?.filename === 'string' ? data.filename : undefined,
+              }
+            ],
+          };
+          (transientItem as any)[TRANSIENT_ITEM_FLAG] = true;
+          history.push(transientItem);
+        }
       } else {
         history.push({
           type: 'function_call_output',
@@ -2100,7 +2431,10 @@ export class AgentSession {
         history = compactedHistory;
         dirty = true;
         // Persist compacted history immediately
-        await this.chatStore.setHistory(this.workingDir, params.sessionId, history, { updateTimestamp: false });
+        const persistHistory = provider === 'anthropic'
+          ? history
+          : buildPersistableOpenAIHistory(history as OpenAIResponseItem[]);
+        await this.chatStore.setHistory(this.workingDir, params.sessionId, persistHistory, { updateTimestamp: false });
         console.log('[AgentSession] Persisted compacted history');
         // Log metrics after compaction
         this.logContextMetrics(history, provider, -1, 'post-compaction', opts?.compactionConfig);
@@ -2132,13 +2466,21 @@ export class AgentSession {
           // Log context size after history growth
           this.logContextMetrics(history, provider, loopIteration, 'post-request', opts?.compactionConfig);
 
-          // Incremental persistence: flush partial assistant output to disk
-          // Use updateTimestamp: false to avoid noisy timestamp churn during streaming
-          try {
-            await this.chatStore.setHistory(this.workingDir, params.sessionId, history, { updateTimestamp: false });
-          } catch (incPersistErr) {
-            console.warn('[AgentSession] Incremental persist failed', incPersistErr);
-          }
+        }
+
+        if (provider !== 'anthropic') {
+          history = cleanupUsedTransients(history as OpenAIResponseItem[]);
+        }
+
+        // Incremental persistence: flush partial assistant output to disk
+        // Use updateTimestamp: false to avoid noisy timestamp churn during streaming
+        try {
+          const persistHistory = provider === 'anthropic'
+            ? history
+            : buildPersistableOpenAIHistory(history as OpenAIResponseItem[]);
+          await this.chatStore.setHistory(this.workingDir, params.sessionId, persistHistory, { updateTimestamp: false });
+        } catch (incPersistErr) {
+          console.warn('[AgentSession] Incremental persist failed', incPersistErr);
         }
 
         loopIteration++;
@@ -2150,7 +2492,10 @@ export class AgentSession {
             if (compactedHistory !== history) {
               history = compactedHistory;
               // Persist compacted history
-              await this.chatStore.setHistory(this.workingDir, params.sessionId, history, { updateTimestamp: false });
+              const persistHistory = provider === 'anthropic'
+                ? history
+                : buildPersistableOpenAIHistory(history as OpenAIResponseItem[]);
+              await this.chatStore.setHistory(this.workingDir, params.sessionId, persistHistory, { updateTimestamp: false });
               console.log('[AgentSession] Mid-loop compaction completed and persisted');
             }
           } catch (midLoopCompactionError) {
@@ -2164,7 +2509,10 @@ export class AgentSession {
       // Persist changes even if an error occurs mid-run
       try {
         if (dirty) {
-          await this.chatStore.setHistory(this.workingDir, params.sessionId, history);
+          const persistHistory = provider === 'anthropic'
+            ? history
+            : buildPersistableOpenAIHistory(history as OpenAIResponseItem[]);
+          await this.chatStore.setHistory(this.workingDir, params.sessionId, persistHistory);
         } else {
           await this.chatStore.touch(this.workingDir, params.sessionId);
         }

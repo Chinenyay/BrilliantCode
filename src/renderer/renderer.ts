@@ -5602,21 +5602,6 @@ function setupAiInput(): void {
             conversationRaw.push(rawResult);
             markDirty();
             pendingToolCallsRaw.delete(resultCallId);
-            if (payload?.name === 'screenshot_preview') {
-              const mime = typeof data?.mime === 'string' ? data.mime : undefined;
-              const base64 = typeof data?.data === 'string' ? data.data : undefined;
-              if (mime && base64) {
-                const screenshotItem: OpenAIResponseItem = {
-                  role: 'user',
-                  content: [
-                    { type: 'input_text', text: 'Here is the screenshot result' },
-                    { type: 'input_image', image_url: `data:${mime};base64,${base64}` },
-                  ],
-                };
-                conversationRaw.push(screenshotItem);
-                markDirty();
-              }
-            }
           }
           setProgress(true);
         }

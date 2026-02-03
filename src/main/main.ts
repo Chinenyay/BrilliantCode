@@ -4198,24 +4198,75 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
   <meta charset="utf-8">
   <title>API Keys</title>
   <style>
-    body{background:#0b0b0b;color:#e6e6e6;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:16px}
+    :root{
+      color-scheme: dark;
+      --bg:#0b0b0b;
+      --text:#e6e6e6;
+      --muted:#bdbdbd;
+      --panel:#0f0f0f;
+      --panel-border:#1f1f1f;
+      --section-title:#9a9a9a;
+      --input-bg:#111;
+      --input-border:#333;
+      --input-text:#eee;
+      --input-placeholder:#7d7d7d;
+      --button-bg:#191919;
+      --button-border:#444;
+      --button-hover:#222;
+      --danger-border:#6b1b1b;
+      --danger-hover:#2a1212;
+      --error:#f6b0b0;
+      --ok:#b5f1c9;
+      --hint:#a0a0a0;
+      --code:#d0d0d0;
+      --status:#a0a0a0;
+      --shadow:0 10px 24px rgba(0,0,0,.35);
+    }
+    @media (prefers-color-scheme: light){
+      :root{
+        color-scheme: light;
+        --bg:#f7f7fa;
+        --text:#1a1a1a;
+        --muted:#5f6368;
+        --panel:#ffffff;
+        --panel-border:#d7d7df;
+        --section-title:#6a6f76;
+        --input-bg:#ffffff;
+        --input-border:#c7c7d1;
+        --input-text:#1a1a1a;
+        --input-placeholder:#8a8f97;
+        --button-bg:#f1f1f5;
+        --button-border:#c7c7d1;
+        --button-hover:#e7e7ee;
+        --danger-border:#c65353;
+        --danger-hover:#f5d9d9;
+        --error:#b00020;
+        --ok:#127a3f;
+        --hint:#6a6f76;
+        --code:#3a3d44;
+        --status:#5f6368;
+        --shadow:0 12px 26px rgba(32,34,38,.18);
+      }
+    }
+    body{background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:16px}
     h1{font-size:16px;margin:0 0 8px}
-    p{margin:0 0 12px;color:#bdbdbd}
+    p{margin:0 0 12px;color:var(--muted)}
     .row{margin:10px 0}
-    .section{border:1px solid #1f1f1f;border-radius:10px;padding:10px 12px;margin:12px 0;background:#0f0f0f}
-    .section-title{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#9a9a9a;margin:0 0 8px}
+    .section{border:1px solid var(--panel-border);border-radius:10px;padding:10px 12px;margin:12px 0;background:var(--panel);box-shadow:var(--shadow)}
+    .section-title{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--section-title);margin:0 0 8px}
     label{display:flex;align-items:center;justify-content:space-between;font-size:11px;opacity:.95;margin-bottom:4px}
-    input, select{width:100%;padding:8px;border-radius:8px;border:1px solid #333;background:#111;color:#eee}
-    .status{font-size:11px;color:#a0a0a0}
+    input, select{width:100%;padding:8px;border-radius:8px;border:1px solid var(--input-border);background:var(--input-bg);color:var(--input-text)}
+    input::placeholder{color:var(--input-placeholder)}
+    .status{font-size:11px;color:var(--status)}
     .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
-    button{padding:8px 12px;border-radius:8px;border:1px solid #444;background:#191919;color:#fff;cursor:pointer}
-    button:hover{background:#222}
-    .danger{border-color:#6b1b1b}
-    .danger:hover{background:#2a1212}
-    .error{color:#f6b0b0;margin-top:10px;min-height:1em}
-    .ok{color:#b5f1c9;margin-top:10px;min-height:1em}
-    .hint{font-size:11px;color:#a0a0a0;margin-top:6px}
-    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;color:#d0d0d0}
+    button{padding:8px 12px;border-radius:8px;border:1px solid var(--button-border);background:var(--button-bg);color:var(--text);cursor:pointer}
+    button:hover{background:var(--button-hover)}
+    .danger{border-color:var(--danger-border)}
+    .danger:hover{background:var(--danger-hover)}
+    .error{color:var(--error);margin-top:10px;min-height:1em}
+    .ok{color:var(--ok);margin-top:10px;min-height:1em}
+    .hint{font-size:11px;color:var(--hint);margin-top:6px}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;color:var(--code)}
   </style>
   <h1>API Keys</h1>
   <p>Keys are stored in your OS keychain (via keytar). You can also use environment variables for development.</p>
