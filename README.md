@@ -12,23 +12,21 @@ BrilliantCode is an open-source agentic IDE that enables frontier models (includ
 
 2. Add your API Keys.
 	1. Go to AI -> API Keys 
-		![Add API Keys](assets/add-api-keys.png)
+		[![Add API Keys](assets/add-api-keys.png)](Add an API key)
 
 3. Select a model
 	1. ![Select Model](assets/select-model.png)
 	2. You can also add custom models
-		![Add New Model](assets/add-new-model.png)
+		[![Add New Model](assets/add-new-model.png)](Add a new model)
 
 4. Create a project or open an existing project
-   ![Choose a Project](assets/choose-a-project.png)
+   [![Choose a Project](assets/choose-a-project.png)](Choose a project)
 
 5. Tell the agent want to do.
-  ![Send a Message](assets/send-a-message.png)
+  [![Send a Message](assets/send-a-message.png)](Send a message)
   
 ## Documentation
 
 Read the documentation to learn more about how BrilliantCode works under the hood:
 
-## Documentation
-More details on running locally, customizing and contributing:
 [Documentation](DOCS.md)
