@@ -11,18 +11,25 @@ BrilliantCode is an open-source agentic IDE that enables frontier models (includ
     https://jcumoke.com/bcode#download
 
 2. Add your API Keys.
+
 	1. Go to AI -> API Keys 
-		![Add API Keys](assets/add-api-keys.png)
+
+	![Add API Keys](assets/add-api-keys.png)
 
 3. Select a model
+
 	1. ![Select Model](assets/select-model.png)
+
 	2. You can also add custom models
+
 		![Add New Model](assets/add-new-model.png)
 
 4. Create a project or open an existing project
+
    ![Choose a Project](assets/choose-a-project.png)
 
 5. Tell the agent want to do.
+
   ![Send a Message](assets/send-a-message.png)
   
 ## Documentation
