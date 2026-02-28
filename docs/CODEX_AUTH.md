@@ -1,279 +1,202 @@
-# Codex Authentication Setup
+# Codex Authentication
 
-BrilliantCode now supports "Sign in with ChatGPT" using the official Codex app-server protocol, similar to how OpenCode implements authentication.
+BrilliantCode uses `codex app-server` for **ChatGPT sign-in and token refresh only**.
 
-## Prerequisites
+After sign-in, normal agent requests do **not** run through the app-server turn/thread protocol. They go through the existing BrilliantCode agent runtime, with model requests sent to:
 
-1. **Install the Codex CLI**:
-   ```bash
-   npm install -g @anthropic/codex
-   ```
+`https://chatgpt.com/backend-api/codex/responses`
 
-2. **Verify installation**:
-   ```bash
-   codex --version
-   ```
+That means:
 
-## How It Works
+- Authentication is managed by Codex.
+- Tool execution is still managed by BrilliantCode.
+- Bash, file edits, terminals, previews, and confirmations still use the existing local runtime in `main.ts`.
 
-### Architecture
+## Short Version
 
-Instead of implementing OAuth directly (which requires managing client IDs and secrets), BrilliantCode uses the **Codex app-server** to handle authentication:
+1. User clicks **Sign in with ChatGPT**.
+2. BrilliantCode starts `codex app-server`.
+3. Codex opens the browser and completes OAuth.
+4. BrilliantCode checks auth state through the app-server.
+5. If there is no OpenAI API key but ChatGPT auth is available, the app uses the Codex backend `responses` endpoint for model requests.
+6. The existing `AgentSession` loop still executes tools locally.
 
-1. **Spawns `codex app-server`**: A subprocess that manages the OAuth flow
-2. **JSON-RPC Communication**: Uses the official Codex app-server protocol
-3. **Automatic Callback Handling**: The app-server handles the OAuth callback on `http://127.0.0.1:1455/auth/callback`
-4. **Token Management**: Codex manages token storage, refresh, and expiry
+## Why This Design
 
-### Flow Diagram
+The ChatGPT/Codex sign-in token is not treated like a normal OpenAI API key in this app.
 
-```
-User clicks "Sign in with ChatGPT"
-         ↓
-BrilliantCode → codex app-server
-         ↓
-JSON-RPC: { method: "account/login/start", params: { type: "chatgpt" } }
-         ↓
-App-server returns authUrl
-         ↓
-Open browser to authUrl
-         ↓
-User completes OAuth in browser
-         ↓
-Browser redirects to http://127.0.0.1:1455/auth/callback
-         ↓
-App-server handles callback automatically
-         ↓
-App-server sends notification: { method: "account/login/completed" }
-         ↓
-BrilliantCode receives notification and updates UI
-```
+Instead:
 
-## Usage
+- `codex app-server` is used to manage login state and token refresh.
+- The app reads the Codex access token and sends model requests to the Codex backend Responses endpoint.
+- This keeps the current BrilliantCode tool runtime intact, so tool calls still go through the same handlers as API-key sessions.
 
-### Sign In
+The important consequence is:
 
-1. Open BrilliantCode
-2. Go to **AI → API Keys…**
-3. Click **"Sign in with ChatGPT"**
-4. Your browser opens to the ChatGPT OAuth page
-5. Complete the sign-in in your browser
-6. The dialog automatically updates when sign-in is complete
+- We do **not** use `thread/start` or `turn/start` for normal agent runs.
+- We do **not** use the old direct OAuth flow.
+- We do **not** use a separate Codex-native tool bridge anymore.
 
-### Sign Out
+## Current Architecture
 
-1. Go to **AI → API Keys…**
-2. Click **"Sign out"**
-3. Your Codex session is cleared
+### Authentication path
 
-### Check Status
+`src/main/main.ts`
 
-The API Keys dialog shows your current authentication status:
-- **Not signed in**: No active session
-- **Signed in - [email]**: Successfully authenticated
+- `openai-oauth:status` starts the shared app-server client if needed and calls `account/read`.
+- `openai-oauth:start` calls `account/login/start` and opens the returned browser URL.
+- `openai-oauth:clear` calls `account/logout`.
 
-## Implementation Details
+`src/services/codex-app-server.ts`
 
-### Key Files
+- Spawns `codex app-server`.
+- Speaks JSON-RPC over stdio.
+- Exposes login/status/logout helpers.
 
-- **`src/services/codex-app-server.ts`**: Codex app-server client implementation
-- **`src/main/main.ts`**: IPC handlers for authentication
-- **`src/preload/preload.ts`**: Preload bridge exposing `window.openaiOAuth`
+### Inference path
 
-### JSON-RPC Protocol
+`src/main/main.ts`
 
-The Codex app-server uses JSON-RPC 2.0 over stdio:
+- `buildOpenAIClient()` chooses the request client:
+  - OpenAI API key present: use the normal OpenAI SDK path.
+  - No API key, but ChatGPT auth exists: use `createCodexChatGPTClient()`.
 
-**Initialize connection:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "initialize",
-  "id": 1,
-  "params": {
-    "clientInfo": {
-      "name": "brilliantcode",
-      "title": "BrilliantCode",
-      "version": "1.0.0"
-    }
-  }
-}
-```
+`src/services/codex-chatgpt-client.ts`
 
-**Start login:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "account/login/start",
-  "id": 2,
-  "params": {
-    "type": "chatgpt"
-  }
-}
-```
+- Reads the Codex access token.
+- Refreshes the token through `codex app-server` when needed.
+- Sends `responses.create` requests to `https://chatgpt.com/backend-api/codex/responses`.
+- Normalizes request payloads for backend compatibility.
+- Parses the streaming response and returns a completed Responses-style object back to the app.
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "loginId": "...",
-    "authUrl": "https://auth.openai.com/oauth/authorize?..."
-  }
-}
-```
+### Tool runtime
 
-**Notifications:**
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "account/login/completed",
-  "params": {
-    "loginId": "...",
-    "success": true
-  }
-}
-```
+`src/agent/session.ts` and `src/main/main.ts`
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "account/updated",
-  "params": {
-    "authMode": "chatgpt",
-    "account": {
-      "type": "chatgpt",
-      "email": "user@example.com"
-    }
-  }
-}
-```
+- Tool calls still go through the normal `AgentSession` loop.
+- Local tool handlers still come from `createToolHandlers(...)`.
+- Integrated terminal tools still use the existing terminal/runtime infrastructure.
 
-### Events
+This is the key behavior to preserve.
 
-The `CodexAppServerClient` emits the following events:
+## Request Flow
 
-- **`login:completed`**: Fired when login flow completes
-- **`account:updated`**: Fired when account state changes
-- **`error`**: Fired on process errors
-- **`exit`**: Fired when app-server process exits
-- **`notification`**: Fired for unknown notifications (debugging)
+### Sign in
+
+1. Renderer calls `window.openaiOAuth.start()`.
+2. Main process starts or reuses `codex app-server`.
+3. Main process sends `account/login/start`.
+4. Browser opens the returned `authUrl`.
+5. Codex handles the callback automatically on `http://127.0.0.1:1455/auth/callback`.
+6. Main process later checks `account/read` to show signed-in state.
+
+### Chat request with ChatGPT auth
+
+1. User sends a message.
+2. `buildOpenAIClient()` checks for an OpenAI API key.
+3. If no API key exists but ChatGPT auth is available, the app uses `createCodexChatGPTClient()`.
+4. The request is converted into a backend-compatible `responses.create` payload.
+5. The backend response is parsed back into a normal Responses-style object.
+6. `AgentSession` processes tool calls exactly like an API-key-backed run.
+
+## Backend Compatibility Notes
+
+The Codex backend Responses endpoint is close to the OpenAI Responses API, but it is not identical.
+
+`src/services/codex-chatgpt-client.ts` currently handles these differences:
+
+- Moves developer/system prompt content into `instructions`.
+- Forces `store: false`.
+- Forces `stream: true` and then aggregates the stream back into one completed response object.
+- Removes fields the backend rejects, such as:
+  - `max_output_tokens`
+  - `prompt_cache_key`
+  - `prompt_cache_retention`
+- Normalizes replayed reasoning items so persisted history matches the stricter backend schema.
+
+## Files To Read
+
+- `src/main/main.ts`
+- `src/services/codex-app-server.ts`
+- `src/services/codex-token.ts`
+- `src/services/codex-chatgpt-client.ts`
+- `src/preload/preload.ts`
+- `src/types/global.d.ts`
+
+## What Is No Longer Used
+
+These are stale designs and should not be reintroduced without a deliberate decision:
+
+- Direct OpenAI OAuth token exchange in BrilliantCode.
+- Manual callback URL paste/exchange flow.
+- Using ChatGPT sign-in as a direct bearer token for `api.openai.com`.
+- Routing normal chats through `codex app-server` `thread/start` / `turn/start`.
+- Separate Codex-specific tool execution for standard agent runs.
+
+## Current Limitations
+
+The ChatGPT-backed client currently implements the method the runtime actually needs:
+
+- `responses.create`: implemented
+
+These are still placeholders in the backend wrapper:
+
+- `responses.stream`
+- `responses.retrieve`
+- `responses.poll`
+
+The current agent runtime does not rely on them for ChatGPT-authenticated runs because the wrapper returns a completed response from `create()`.
 
 ## Troubleshooting
 
-### "Failed to start ChatGPT sign-in"
+### `Failed to start ChatGPT sign-in`
 
-**Cause**: Codex CLI not installed or not in PATH
+Most likely causes:
 
-**Solution**:
+- `codex` CLI is not installed
+- `codex` is not on `PATH`
+- the app-server process failed to start
+
+Check:
+
 ```bash
-npm install -g @anthropic/codex
-# or
-brew install codex
+codex --version
 ```
 
-### Port 1455 Already in Use
+### Sign-in completes in browser but the app still shows signed out
 
-**Cause**: Another instance of Codex CLI or BrilliantCode is running
+Check:
 
-**Solution**:
-1. Close all Codex CLI instances
-2. Close all BrilliantCode windows
-3. Kill any lingering processes:
-   ```bash
-   lsof -ti:1455 | xargs kill -9
-   ```
-4. Restart BrilliantCode
+- `codex app-server` can start successfully
+- nothing else is conflicting with the callback listener on `127.0.0.1:1455`
 
-### "Sign-in timeout"
+### Backend request schema errors
 
-**Cause**: Login flow took too long (>60 seconds)
+The Codex backend is stricter than the normal OpenAI API path.
 
-**Solution**:
-1. Try again
-2. Check your internet connection
-3. Verify you can access `https://auth.openai.com`
+If you see errors like:
 
-### Browser Didn't Open
+- `Missing required parameter: 'input[3].summary[0].type'`
 
-If the browser doesn't open automatically:
+then the stored history shape usually needs to be normalized before sending it to the backend. That logic lives in `src/services/codex-chatgpt-client.ts`.
 
-1. Copy the login URL from the dialog
-2. Paste it into your browser manually
-3. Complete the OAuth flow
-4. The callback is handled automatically - you don't need to paste anything back
+### 401 or expired-session errors
 
-## Differences from Direct OAuth
+The backend wrapper asks `codex app-server` to refresh auth state before retrying once.
 
-### What We Removed
+If refresh still fails:
 
-- ❌ `OPENAI_OAUTH_CLIENT_ID` environment variable
-- ❌ `OPENAI_OAUTH_REDIRECT_URI` configuration
-- ❌ Manual OAuth implementation
-- ❌ Manual callback server
-- ❌ Manual token refresh logic
-- ❌ Manual paste of redirect URL
+1. Sign out
+2. Sign back in
 
-### What We Gained
+## Maintainer Notes
 
-- ✅ Official Codex app-server protocol
-- ✅ Automatic callback handling
-- ✅ Automatic token management
-- ✅ Consistent with other Codex clients (OpenCode, etc.)
-- ✅ No OAuth secrets to manage
-- ✅ Better error handling and notifications
+If you change auth again, keep these boundaries explicit:
 
-## API Reference
-
-### `CodexAppServerClient`
-
-#### Methods
-
-**`start(): Promise<void>`**
-
-Start the Codex app-server subprocess and initialize the connection.
-
-**`stop(): Promise<void>`**
-
-Stop the Codex app-server subprocess gracefully.
-
-**`isRunning(): boolean`**
-
-Check if the app-server process is currently running.
-
-**`getAuthState(options?: { refreshToken?: boolean }): Promise<CodexAuthState>`**
-
-Get the current authentication state.
-
-**`startChatGPTLogin(): Promise<CodexLoginStartResult>`**
-
-Start the ChatGPT OAuth login flow. Returns the `authUrl` to open in a browser.
-
-**`logout(): Promise<void>`**
-
-Log out from the current Codex session.
-
-#### Events
-
-**`login:completed`**
-
-Emitted when a login flow completes (success or failure).
-
-**`account:updated`**
-
-Emitted when the account authentication state changes.
-
-**`error`**
-
-Emitted when the app-server process encounters an error.
-
-**`exit`**
-
-Emitted when the app-server process exits.
+- `codex app-server` owns login state.
+- BrilliantCode owns the tool runtime.
+- The two should stay decoupled unless there is a deliberate reason to change the agent execution model.
 
 ## References
 
-- [Codex CLI Documentation](https://docs.anthropic.com/codex)
-- [Codex App-Server Protocol](https://github.com/anthropics/codex-cli)
-- [OpenCode Implementation](https://github.com/opencoder-llm/opencode)
+- [OpenAI Codex app-server documentation](https://developers.openai.com/codex/app-server/)
