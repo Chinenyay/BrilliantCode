@@ -91,6 +91,17 @@ contextBridge.exposeInMainWorld('apiKeys', {
   showDialog: (): void => ipcRenderer.send('api-keys:show-dialog'),
 });
 
+contextBridge.exposeInMainWorld('openaiOAuth', {
+  status: (): Promise<{ ok: boolean; status?: { configured: boolean; accountId?: string; expiresAt?: number; expired?: boolean }; error?: string }> =>
+    ipcRenderer.invoke('openai-oauth:status'),
+  start: (): Promise<{ ok: boolean; authUrl?: string; redirectUri?: string; manual?: boolean; browserOpened?: boolean; error?: string }> =>
+    ipcRenderer.invoke('openai-oauth:start'),
+  exchange: (payload: { redirectUrl?: string; code?: string }): Promise<{ ok: boolean; status?: { configured: boolean; accountId?: string; expiresAt?: number; expired?: boolean }; error?: string }> =>
+    ipcRenderer.invoke('openai-oauth:exchange', payload),
+  clear: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('openai-oauth:clear'),
+});
+
 contextBridge.exposeInMainWorld('layout', {
   setSplit: (ratio: number): void => ipcRenderer.send('layout:set-split', ratio),
   setRightBounds: (bounds: { x: number; y: number; width: number; height: number }): void =>

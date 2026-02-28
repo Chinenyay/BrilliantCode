@@ -15,16 +15,25 @@ async function refreshStatus(): Promise<void> {
   }
 
   try {
-    const res = await window.apiKeys.status();
+    const [res, oauthRes] = await Promise.all([
+      window.apiKeys.status(),
+      window.openaiOAuth?.status ? window.openaiOAuth.status() : Promise.resolve(null)
+    ]);
     if (!res?.ok || !res.status) {
       setStatus(res?.error || 'Unable to read API key status.', 'error');
       return;
     }
     const openai = res.status.openai?.configured === true;
+    const openaiOauth = oauthRes?.ok && oauthRes.status?.configured === true;
     const openaiCompat = res.status.openaiCompat?.configured === true;
     const anthropic = res.status.anthropic?.configured === true;
+    const openaiLabel = openai
+      ? 'configured (api key)'
+      : openaiOauth
+        ? 'configured (chatgpt)'
+        : 'missing';
     const summary = [
-      `OpenAI: ${openai ? 'configured' : 'missing'}`,
+      `OpenAI: ${openaiLabel}`,
       `OpenAI-compatible: ${openaiCompat ? 'configured' : 'missing'}`,
       `Anthropic: ${anthropic ? 'configured' : 'missing'}`,
     ].join(' · ');

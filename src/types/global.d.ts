@@ -42,6 +42,12 @@ declare global {
       clearCompatBaseUrl: () => Promise<{ ok: boolean; error?: string }>;
       showDialog?: () => void;
     };
+    openaiOAuth?: {
+      status: () => Promise<{ ok: boolean; status?: { configured: boolean; accountId?: string; expiresAt?: number; expired?: boolean }; error?: string }>;
+      start: () => Promise<{ ok: boolean; authUrl?: string; redirectUri?: string; manual?: boolean; browserOpened?: boolean; error?: string }>;
+      exchange: (payload: { redirectUrl?: string; code?: string }) => Promise<{ ok: boolean; status?: { configured: boolean; accountId?: string; expiresAt?: number; expired?: boolean }; error?: string }>;
+      clear: () => Promise<{ ok: boolean; error?: string }>;
+    };
     billing?: {
       status: () => Promise<{ ok: boolean; state?: {
         ok: boolean;

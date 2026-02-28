@@ -79,9 +79,7 @@ async function createFile(
 }
 
 /**
- * Edit a file by replacing all exact matches of oldText with newText.
- * Mirrors the Python example semantics and return shape, adapted to TS.
- *
+ * Edit a file by replacing all exact matches of oldText with newText. *
  * Params:
  * @param filePath: Path to the file to edit
  * @param oldText: Exact text to search for
