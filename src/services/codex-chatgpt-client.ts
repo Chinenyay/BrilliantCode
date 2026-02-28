@@ -144,12 +144,42 @@ function normalizeReasoningParts(
   return normalized;
 }
 
+function normalizeMessageContentPart(part: unknown): unknown {
+  if (!part || typeof part !== 'object') {
+    return part;
+  }
+
+  const record = { ...(part as Record<string, unknown>) };
+  const type = typeof record.type === 'string' ? record.type : '';
+
+  if (type === 'input_image') {
+    const normalized: Record<string, unknown> = { type: 'input_image' };
+    if (typeof record.image_url === 'string' && record.image_url.trim()) {
+      normalized.image_url = record.image_url.trim();
+    }
+    if (record.file_id == null || typeof record.file_id === 'string') {
+      if (typeof record.file_id === 'string' ? record.file_id.trim() : record.file_id === null) {
+        normalized.file_id = record.file_id;
+      }
+    }
+    if (record.detail === 'low' || record.detail === 'high' || record.detail === 'auto') {
+      normalized.detail = record.detail;
+    }
+    return normalized;
+  }
+
+  return record;
+}
+
 function normalizeBackendItem(item: unknown): unknown {
   if (!item || typeof item !== 'object') {
     return item;
   }
 
   const record = { ...(item as Record<string, unknown>) };
+  if (Array.isArray(record.content)) {
+    record.content = record.content.map(normalizeMessageContentPart);
+  }
   if (record.type !== 'reasoning') {
     return record;
   }

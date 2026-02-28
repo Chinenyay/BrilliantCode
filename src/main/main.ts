@@ -4734,6 +4734,23 @@ function handleManualUpdateCheck(): void {
   })();
 }
 
+async function startChatGPTSignInFromMenu(): Promise<void> {
+  try {
+    const codexClient = getSharedCodexClient();
+    if (!codexClient.isRunning()) {
+      await codexClient.start();
+    }
+    const loginResult = await codexClient.startChatGPTLogin();
+    try {
+      await shell.openExternal(loginResult.authUrl);
+    } catch {
+      dialog.showErrorBox('ChatGPT Sign-in', `Please open this URL to sign in:\n\n${loginResult.authUrl}`);
+    }
+  } catch (error: any) {
+    dialog.showErrorBox('ChatGPT Sign-in Failed', error?.message || 'Failed to start ChatGPT sign-in. Make sure the Codex CLI is installed.');
+  }
+}
+
 function buildAndSetMenu(): void {
   const activeWindow = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null;
   const activeWinId = activeWindow?.id ?? null;
@@ -4787,11 +4804,16 @@ function buildAndSetMenu(): void {
     label: 'AI',
     submenu: [
       {
-        label: 'API Keys…',
+        label: 'Add API Key',
         click: () => {
           const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null;
           showApiKeysDialog(win);
         }
+      },
+      { type: 'separator' },
+      {
+        label: 'Sign in with ChatGPT…',
+        click: () => { void startChatGPTSignInFromMenu(); }
       },
       { type: 'separator' },
       {

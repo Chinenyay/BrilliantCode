@@ -162,6 +162,56 @@ describe('createCodexChatGPTClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('strips unsupported input_image fields from replayed message content', async () => {
+    mocked.getCodexAccessToken.mockResolvedValue('token-1');
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+
+      expect(body.input).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'inspect this image' },
+            {
+              type: 'input_image',
+              image_url: 'data:image/png;base64,abc123',
+              detail: 'low',
+            },
+          ],
+        },
+      ]);
+
+      return buildSseResponse({
+        id: 'resp_image',
+        status: 'completed',
+        output: [],
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = createCodexChatGPTClient();
+    await client.responses.create({
+      model: 'gpt-5',
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'inspect this image' },
+            {
+              type: 'input_image',
+              image_url: 'data:image/png;base64,abc123',
+              mime_type: 'image/png',
+              filename: 'capture.png',
+              detail: 'low',
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes the auth token and retries once when the backend returns 401', async () => {
     mocked.getCodexAccessToken
       .mockResolvedValueOnce('stale-token')
