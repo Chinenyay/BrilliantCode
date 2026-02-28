@@ -991,7 +991,7 @@ const applyPromptCachingDefaults = async <T extends Record<string, any>>(params:
   }
 
   // Request retention by default (if the upstream rejects these fields, we retry without them).
-  const allowRetention = modelName.trim() && modelName.trim() !== 'gpt-5-pro';
+  const allowRetention = modelName.trim() && modelName.trim() !== 'gpt-5.2-pro';
   if (allowRetention && (typeof next.prompt_cache_retention !== 'string' || !next.prompt_cache_retention.trim())) {
     next.prompt_cache_retention = PROMPT_CACHE_RETENTION;
   }
@@ -1049,6 +1049,15 @@ const createRequestGate = (limit: number) => {
 
 const MODEL_REQUEST_CONCURRENCY = parseEnvInt(['AGENT_MAX_CONCURRENT_REQUESTS', 'AGENT_MODEL_CONCURRENCY'], 1);
 const withModelRequestGate = createRequestGate(MODEL_REQUEST_CONCURRENCY);
+
+const assertModelAvailableForAuth = async (model: string): Promise<void> => {
+    if (model !== 'gpt-5.2-pro') return;
+    const { key } = await apiKeys.getApiKey('openai');
+    if (key) return;
+    if (await hasCodexChatGPTAuth()) {
+        throw new Error('gpt-5.2-pro requires an OpenAI API key and is unavailable with ChatGPT sign-in.');
+    }
+};
 
 const llmClient = (() => {
     const buildOpenAIClient = async (): Promise<any> => {
@@ -2536,6 +2545,7 @@ ipcMain.on('ai:chatStream', async (ipcEvent: IpcMainEvent, payload: {
         const fallbackModel = process.env.BRILLIANTCODE_DEFAULT_MODEL || process.env.AZURE_OPENAI_DEPLOYMENT;
         const model = modelFromOptions || fallbackModel;
         if (!model) throw new Error('Missing model (set BRILLIANTCODE_DEFAULT_MODEL or pass options.model)');
+        await assertModelAvailableForAuth(model);
 
         // OpenAI and Anthropic use user-provided API keys (AI → API Keys…).
 

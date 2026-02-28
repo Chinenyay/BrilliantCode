@@ -761,6 +761,16 @@ const ALL_REASONING_OPTIONS: UiState['reasoning'][] = ['low', 'medium', 'high', 
 
 type ModelMeta = { key: string; name: string; provider?: string; type?: string; source?: 'builtin' | 'custom' };
 let modelsMeta: ModelMeta[] = [];
+let codexOnlyOpenAIAuth = false;
+
+const MODEL_FALLBACKS: ModelMeta[] = [
+  { key: 'gpt-5.2', name: 'gpt-5.2', provider: 'openai', source: 'builtin' },
+  { key: 'gpt-5.3-codex', name: 'gpt-5.3-codex', provider: 'openai', source: 'builtin' },
+  { key: 'gpt-5.2-pro', name: 'gpt-5.2-pro', provider: 'openai', source: 'builtin' },
+  { key: 'gpt-5-mini', name: 'gpt-5-mini', provider: 'openai', source: 'builtin' },
+  { key: 'claude-sonnet-4.5', name: 'claude-sonnet-4.5', provider: 'anthropic', source: 'builtin' },
+  { key: 'claude-opus-4.5', name: 'claude-opus-4.5', provider: 'anthropic', source: 'builtin' },
+];
 
 type ToastKind = 'info' | 'success' | 'error';
 
@@ -1296,8 +1306,8 @@ let noticeListenerAttached = false;
 // agent mode the user picked.
 
 function allowedReasoningOptions(modelKey: string): UiState['reasoning'][] {
-  if (modelKey === 'gpt-5-pro') return ['high'];
-  if (modelKey === 'gpt-5.2' || modelKey === 'gpt-5.1' || modelKey === 'gpt-5.1-codex-max') return ['low', 'medium', 'high', 'xhigh'];
+  if (modelKey === 'gpt-5.2-pro') return ['high'];
+  if (modelKey === 'gpt-5.2' || modelKey === 'gpt-5.3-codex') return ['low', 'medium', 'high', 'xhigh'];
   // Default: standard models support low/medium/high
   return ['low', 'medium', 'high'];
 }
@@ -1335,7 +1345,7 @@ function applyReasoningConstraints(): void {
       btn.classList.toggle('disabled-option', !isAllowed);
       btn.removeAttribute('aria-hidden');
       if (!isAllowed) {
-        btn.title = 'Only available for gpt-5.1, gpt-5.1-codex-max, and gpt-5.2';
+        btn.title = 'Only available for gpt-5.2 and gpt-5.3-codex';
       } else {
         btn.title = '';
       }
@@ -1385,18 +1395,93 @@ function alignActiveSessionProviderToModel(): void {
   if (idx >= 0) chatSessions[idx] = { ...session };
 }
 
+function getModelProviderForKey(key: string): Provider {
+  const provider = modelsMeta.find(m => m.key === key)?.provider;
+  if (provider === 'anthropic' || provider === 'openai_compat' || provider === 'openai') {
+    return provider;
+  }
+  return getModelProvider(key);
+}
+
+function isModelDisabledForCurrentAuth(key: string): boolean {
+  return codexOnlyOpenAIAuth && key === 'gpt-5.2-pro';
+}
+
+function getDisabledModelReason(key: string): string {
+  if (isModelDisabledForCurrentAuth(key)) {
+    return 'Requires an OpenAI API key; unavailable with ChatGPT sign-in';
+  }
+  return '';
+}
+
+function getModelCandidates(): ModelMeta[] {
+  return modelsMeta.length ? modelsMeta : MODEL_FALLBACKS;
+}
+
+function getAllowedModelFallback(preferredProvider?: Provider | null): string {
+  const candidates = getModelCandidates().filter(meta => !isModelDisabledForCurrentAuth(meta.key));
+  if (preferredProvider) {
+    const preferred = candidates.find(meta => getModelProviderForKey(meta.key) === preferredProvider);
+    if (preferred?.key) return preferred.key;
+  }
+  return candidates[0]?.key || 'gpt-5.2';
+}
+
+async function refreshAuthModelConstraints(): Promise<void> {
+  try {
+    const [keysRes, oauthRes] = await Promise.all([
+      window.apiKeys?.status?.(),
+      window.openaiOAuth?.status?.(),
+    ]);
+    const openaiKeyConfigured = !!keysRes?.status?.openai?.configured;
+    const codexConfigured = !!oauthRes?.status?.configured;
+    codexOnlyOpenAIAuth = codexConfigured && !openaiKeyConfigured;
+  } catch {
+    codexOnlyOpenAIAuth = false;
+  }
+}
+
+function enforceAuthModelConstraints(opts?: { notify?: boolean }): boolean {
+  if (!isModelDisabledForCurrentAuth(uiState.model)) return false;
+  const preferredProvider = lockedProviderForActiveSession() ?? getModelProviderForKey(uiState.model);
+  const fallback = getAllowedModelFallback(preferredProvider);
+  if (!fallback || fallback === uiState.model) return false;
+  const previousModel = uiState.model;
+  uiState.model = fallback;
+  alignActiveSessionProviderToModel();
+  enforceReasoningForModel();
+  saveUiState();
+  syncUiLabels();
+  applyModelLockConstraints();
+  if (opts?.notify) {
+    showToast(`${previousModel} requires an OpenAI API key. Switched to ${fallback}.`, 'info');
+  }
+  return true;
+}
+
 function applyModelLockConstraints(): void {
   const locked = lockedProviderForActiveSession();
   const menu = document.getElementById('dd-model');
   menu?.querySelectorAll<HTMLButtonElement>('.item').forEach(btn => {
     const key = btn.getAttribute('data-value') || '';
-    const meta = modelsMeta.find(m => m.key === key);
-    const provider = meta?.provider || getModelProvider(key);
-    const lockedOut = locked && provider && provider !== locked;
-    btn.disabled = lockedOut;
-    if (lockedOut) {
+    if (!key) {
+      btn.disabled = false;
+      btn.classList.remove('disabled-option');
+      btn.removeAttribute('aria-disabled');
+      btn.title = '';
+      return;
+    }
+    const provider = getModelProviderForKey(key);
+    const authLocked = isModelDisabledForCurrentAuth(key);
+    const providerLocked = !!locked && provider !== locked;
+    const disabled = authLocked || providerLocked;
+    btn.disabled = disabled;
+    btn.classList.toggle('disabled-option', disabled);
+    if (disabled) {
       btn.setAttribute('aria-disabled', 'true');
-      btn.title = 'Switch provider by starting a new chat';
+      btn.title = authLocked
+        ? getDisabledModelReason(key)
+        : 'Switch provider by starting a new chat';
     } else {
       btn.removeAttribute('aria-disabled');
       btn.title = '';
@@ -1436,16 +1521,13 @@ function syncUiLabels(): void {
   if (modeText) modeText.textContent = uiState.mode === 'agent' ? 'Agent' : uiState.mode === 'agent_full' ? 'Full Access' : 'Chat';
   const rs = document.getElementById('reasoning-current');
   if (rs) {
-    const label = (() => {
-      switch (uiState.reasoning) {
-        case 'low': return 'Low';
-        case 'medium': return 'Medium';
-        case 'high': return 'High';
-        case 'xhigh': return 'Extra High';
-        default: return uiState.reasoning.charAt(0).toUpperCase() + uiState.reasoning.slice(1);
-      }
-    })();
-    rs.textContent = label;
+    const labels: Record<UiState['reasoning'], string> = {
+      low: 'Low',
+      medium: 'Medium',
+      high: 'High',
+      xhigh: 'Extra High',
+    };
+    rs.textContent = labels[uiState.reasoning];
   }
   const model = document.getElementById('model-current');
   if (model) {
@@ -1700,12 +1782,17 @@ function setupDropdown(triggerId: string, menuId: string) {
       .forEach(b => b.setAttribute('aria-expanded', 'false'));
 
     if (willOpen) {
-      if (menuId === 'dd-model') {
-        applyModelLockConstraints();
-      }
-      menu.classList.add('open');
-      trigger.setAttribute('aria-expanded', 'true');
-      requestAnimationFrame(place);
+      const openMenu = async () => {
+        if (menuId === 'dd-model') {
+          await refreshAuthModelConstraints();
+          enforceAuthModelConstraints();
+          applyModelLockConstraints();
+        }
+        menu.classList.add('open');
+        trigger.setAttribute('aria-expanded', 'true');
+        requestAnimationFrame(place);
+      };
+      void openMenu();
     } else {
       close();
     }
@@ -2042,12 +2129,13 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
   if (!menu) return;
   menu.innerHTML = '<div class="item" role="menuitem" style="opacity:.7">Loading…</div>';
   try {
+    await refreshAuthModelConstraints();
     const res = await window.ai?.models?.list?.();
     if (!res || !res.ok || !Array.isArray(res.models) || res.models.length === 0) {
       menu.innerHTML = '<div class="item" role="menuitem">No models available</div>';
       return;
     }
-    modelsMeta = res.models.map((m: any) => ({
+    modelsMeta = res.models.map((m: any): ModelMeta => ({
       key: String(m?.key || ''),
       name: String(m?.name || m?.key || ''),
       provider: typeof m?.provider === 'string' ? m.provider : getModelProvider(String(m?.key || '')),
@@ -2057,13 +2145,14 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
     menu.innerHTML = '';
 
     enforceModelProviderLock();
+    enforceAuthModelConstraints();
 
     const lockedProvider = lockedProviderForActiveSession();
 
     const onSelect = (key: string) => {
-      const meta = modelsMeta.find(m => m.key === key);
-      const provider = meta?.provider || getModelProvider(key);
-      if (lockedProvider && provider && provider !== lockedProvider) return;
+      const provider = getModelProviderForKey(key);
+      if (lockedProvider && provider !== lockedProvider) return;
+      if (isModelDisabledForCurrentAuth(key)) return;
       uiState.model = key;
       alignActiveSessionProviderToModel();
       enforceReasoningForModel();
@@ -2094,11 +2183,16 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
       selectionTick.setAttribute('aria-hidden', 'true');
       selectionTick.textContent = '✓';
       btn.appendChild(selectionTick);
-      const lockedOut = lockedProvider && meta.provider && meta.provider !== lockedProvider;
-      btn.disabled = lockedOut;
-      if (lockedOut) {
+      const authLocked = isModelDisabledForCurrentAuth(meta.key);
+      const providerLocked = !!lockedProvider && getModelProviderForKey(meta.key) !== lockedProvider;
+      const disabled = authLocked || providerLocked;
+      btn.disabled = disabled;
+      btn.classList.toggle('disabled-option', disabled);
+      if (disabled) {
         btn.setAttribute('aria-disabled', 'true');
-        btn.title = 'Switch provider by starting a new chat';
+        btn.title = authLocked
+          ? getDisabledModelReason(meta.key)
+          : 'Switch provider by starting a new chat';
       } else {
         btn.removeAttribute('aria-disabled');
         btn.title = '';
@@ -2169,6 +2263,8 @@ async function populateModelMenu(menu: HTMLElement | null): Promise<void> {
 
 async function setupUiControls(): Promise<void> {
   loadUiState();
+  await refreshAuthModelConstraints();
+  enforceAuthModelConstraints();
   syncUiLabels();
   const ddMode = document.getElementById('dd-mode');
   const ddReason = document.getElementById('dd-reason');
@@ -4121,6 +4217,8 @@ function openChatSession(chatId: string, opts: { focusInput?: boolean; pendingAd
 
 async function startNewChatSession(): Promise<void> {
   try {
+    await refreshAuthModelConstraints();
+    enforceAuthModelConstraints();
     const res = await window.ai.sessions.create({ model: uiState.model });
     if (!res || !res.ok || !res.session) return;
     const session = normalizeStoredSession(res.session);
@@ -6062,6 +6160,8 @@ function setupAiInput(): void {
     const displayText = rawText.trim();
     if (!displayText && pendingAttachments.length === 0) return;
     hideMentionMenu();
+    await refreshAuthModelConstraints();
+    enforceAuthModelConstraints({ notify: true });
     await ensureActiveChat();
     if (!activeChatId) return;
     const sessionId = activeChatId;

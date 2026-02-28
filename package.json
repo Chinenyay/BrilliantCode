@@ -1,6 +1,6 @@
 {
   "name": "brilliantcode",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "Your AI engineer, powered by the best frontier AI models.",
   "main": "dist/main/main.js",
   "type": "module",

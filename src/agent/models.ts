@@ -27,24 +27,6 @@ export type CustomModelInput = {
 // These keys map to deployment/model names that the renderer passes back from the
 // model picker. The main process relays the chosen string directly to the SDK.
 export const OPENAI_MODELS: Record<string, Model> = {
-  'gpt-5.1-codex-max': {
-    name: 'gpt-5.1-codex-max',
-    type: 'reasoning',
-    provider: 'openai',
-    streaming: false,
-    reasoning: true,
-    contextWindowTokens: 272_000,
-    compactionTargetTokens: 180_000,
-  },
-  'gpt-5.1': {
-    name: 'gpt-5.1',
-    type: 'reasoning',
-    provider: 'openai',
-    streaming: false,
-    reasoning: true,
-    contextWindowTokens: 272_000,
-    compactionTargetTokens: 180_000,
-  },
   'gpt-5.2': {
     name: 'gpt-5.2',
     type: 'reasoning',
@@ -54,8 +36,26 @@ export const OPENAI_MODELS: Record<string, Model> = {
     contextWindowTokens: 272_000,
     compactionTargetTokens: 180_000,
   },
-  'gpt-5-pro': {
-    name: 'gpt-5-pro',
+  'gpt-5.3-codex': {
+    name: 'gpt-5.3-codex',
+    type: 'reasoning',
+    provider: 'openai',
+    streaming: false,
+    reasoning: true,
+    contextWindowTokens: 272_000,
+    compactionTargetTokens: 180_000,
+  },
+  'gpt-5.2-pro': {
+    name: 'gpt-5.2-pro',
+    type: 'reasoning',
+    provider: 'openai',
+    streaming: false,
+    reasoning: true,
+    contextWindowTokens: 272_000,
+    compactionTargetTokens: 180_000,
+  },
+  'gpt-5-mini': {
+    name: 'gpt-5-mini',
     type: 'reasoning',
     provider: 'openai',
     streaming: false,

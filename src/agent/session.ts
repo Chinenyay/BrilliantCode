@@ -2140,7 +2140,7 @@ export class AgentSession {
 
     try {
       response = await retry(() => this.client.responses.create(params));
-      // Poll for completion (for non-streaming models like gpt-5-pro)
+      // Poll for completion (for non-streaming models like gpt-5.2-pro)
       response = await waitForResponseCompletion(this.client, response, {
         isStopping: () => this.stopping
       });
