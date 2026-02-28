@@ -34,10 +34,8 @@ BrilliantCode uses the official **Codex app-server** protocol for Sign in with C
 
 ### Unchanged Files (Backward Compatibility)
 
-- **`src/services/openai-oauth.ts`** - Kept for legacy token storage
-- **`src/main/openai-oauth-utils.ts`** - Kept for fallback parsing
-- **`src/preload/preload.ts`** - No changes (API surface same)
-- **`src/types/global.d.ts`** - No changes (types match)
+- **`src/preload/preload.ts`** - Keeps the `window.openaiOAuth` bridge, now Codex-only
+- **`src/types/global.d.ts`** - Keeps matching `window.openaiOAuth` typings
 
 ## How to Test
 

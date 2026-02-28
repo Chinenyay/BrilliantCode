@@ -100,5 +100,28 @@ describe('CodexAppServerClient', () => {
         },
       });
     });
+
+    it('should emit request event for server-initiated requests', () => {
+      const handler = vi.fn();
+      client.on('request', handler);
+
+      const request = {
+        jsonrpc: '2.0',
+        method: 'item/tool/call',
+        id: 42,
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          callId: 'call-1',
+          tool: 'echo_tool',
+          arguments: { text: 'hello' },
+        },
+      };
+
+      // @ts-ignore - accessing private method for testing
+      client.handleMessage(request);
+
+      expect(handler).toHaveBeenCalledWith(request);
+    });
   });
 });

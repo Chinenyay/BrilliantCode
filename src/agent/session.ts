@@ -57,7 +57,15 @@ export interface AgentSessionTransport {
   requestConfirmation(request: AgentSessionConfirmationRequest): Promise<boolean>;
 }
 
-type ToolHandler = (args: any) => Promise<any>;
+export type AgentToolHandler = (args: any) => Promise<any>;
+
+export interface AgentSessionClientBindings {
+  transport: AgentSessionTransport;
+  toolHandlers: Record<string, AgentToolHandler>;
+  cancels: Map<string, AbortController>;
+}
+
+type ToolHandler = AgentToolHandler;
 
 type RunOpts = {
   preamble?: string;
@@ -1273,7 +1281,7 @@ const waitForResponseCompletion = async (client: any, initial: any, opts?: WaitF
 // Tool Execution
 // ============================================================================
 
-const executeToolCall = async (
+export const executeToolCall = async (
   toolName: string,
   callId: string,
   argsJson: string,
@@ -1488,6 +1496,7 @@ export class AgentSession {
   private systemPromptDynamic: string | null = null;
   private stopping = false;
   private abortControllers = new Map<string, AbortController>();
+  readonly cancels = this.abortControllers;
 
   constructor(args: {
     transport: AgentSessionTransport;
@@ -1509,6 +1518,19 @@ export class AgentSession {
     this.additionalWorkingDir = args.additionalWorkingDir || null;
     this.autoMode = args.autoMode;
     this.chatStore = args.chatStore;
+
+    try {
+      const bind = (this.client as { bindAgentSession?: (bindings: AgentSessionClientBindings) => void } | null | undefined)?.bindAgentSession;
+      if (typeof bind === 'function') {
+        bind({
+          transport: this.transport,
+          toolHandlers: this.toolHandlers,
+          cancels: this.abortControllers,
+        });
+      }
+    } catch (error) {
+      console.warn('[AgentSession] Failed to bind client session context', error);
+    }
   }
 
   stop(): void {
@@ -2133,6 +2155,7 @@ export class AgentSession {
 
     let toolCalled = false;
     const outputItems = Array.isArray(response.output) ? response.output : [];
+    const skipTransportReplay = response?.__bc_codex_streamed === true;
 
     // Emit reasoning if present (via summary_done event, not as regular chunk)
     // Also add reasoning items to history first to maintain correct order
@@ -2143,7 +2166,7 @@ export class AgentSession {
           ? item.summary.map((s: any) => s.text).filter(Boolean).join('\n')
           : '';
 
-        if (summaries) {
+        if (summaries && !skipTransportReplay) {
           // Emit as reasoning event so it doesn't interfere with assistant message
           this.transport.emit('ai:reasoning:summary_done', { text: summaries });
         }
@@ -2161,6 +2184,9 @@ export class AgentSession {
       history.push(item);
 
       if (item.type === 'function_call') {
+        if (skipTransportReplay) {
+          continue;
+        }
         toolCalled = true;
         const argsJson = typeof item.arguments === 'string'
           ? item.arguments
@@ -2174,6 +2200,9 @@ export class AgentSession {
 
         await this.handleToolCall(item, history);
       } else if (item.type === 'message') {
+        if (skipTransportReplay) {
+          continue;
+        }
         const text = extractText(item);
         if (text) {
           this.transport.emit('ai:chatStream:chunk', text);
@@ -2185,7 +2214,7 @@ export class AgentSession {
     // Fallback: emit aggregate text if available AND we haven't already emitted message text
     // This prevents double-emission for Anthropic responses where both message.content
     // and output_text contain the same data
-    if (response.output_text && !emittedMessageText) {
+    if (response.output_text && !emittedMessageText && !skipTransportReplay) {
       this.transport.emit('ai:chatStream:chunk', response.output_text);
     }
 

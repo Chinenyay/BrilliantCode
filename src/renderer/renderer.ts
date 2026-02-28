@@ -5172,6 +5172,8 @@ function setupAiInput(): void {
         case 'grep_search': return 'Grep Search';
         case 'create_file': return 'Create File';
         case 'create_diff': return 'Diff';
+        case 'file_change': return 'File Change';
+        case 'command_execution': return 'Command';
         case 'terminal_input': return 'Terminal Input';
         case 'read_terminal': return 'Read Terminal';
         case 'summarize_terminal_output': return 'Summarize Terminal Output';
@@ -5297,6 +5299,7 @@ function setupAiInput(): void {
 
           // Switch to terminal tab for terminal-related tools
           const terminalTools = new Set([
+            'command_execution',
             'terminal_input',
             'read_terminal',
             'summarize_terminal_output',
@@ -5320,6 +5323,12 @@ function setupAiInput(): void {
                 const terminal = args?.terminal_id ? String(args.terminal_id) : 'default';
                 const trimmed = cmd.trim();
                 detail = trimmed ? `[${terminal}] ${trimmed}` : `[${terminal}]`;
+                break;
+              }
+              case 'command_execution': {
+                const cmd = String(args?.command ?? '');
+                const cwd = args?.cwd ? formatScopedPathForDisplay(String(args.cwd)) : '';
+                detail = [cwd ? `cwd: ${cwd}` : '', cmd].filter(Boolean).join(' | ');
                 break;
               }
               case 'read_terminal': {
@@ -5360,6 +5369,20 @@ function setupAiInput(): void {
               }
               case 'create_file': detail = args?.filePath ? formatScopedPathForDisplay(String(args.filePath)) : ''; fileForOpen = args?.filePath; break;
               case 'create_diff': detail = args?.filePath ? formatScopedPathForDisplay(String(args.filePath)) : ''; fileForOpen = args?.filePath; break;
+              case 'file_change': {
+                const p = typeof args?.path === 'string' ? String(args.path) : '';
+                const paths = Array.isArray(args?.paths) ? args.paths.map((value: any) => String(value || '')).filter(Boolean) : [];
+                if (p) {
+                  detail = formatScopedPathForDisplay(p);
+                  fileForOpen = p;
+                } else if (paths.length === 1) {
+                  detail = formatScopedPathForDisplay(paths[0]);
+                  fileForOpen = paths[0];
+                } else if (paths.length > 1) {
+                  detail = `${paths.length} files`;
+                }
+                break;
+              }
               case 'generate_image_tool': fileForOpen = args?.outputPath; break;
               default: detail = String(payload?.arguments || '');
             }
@@ -5465,7 +5488,7 @@ function setupAiInput(): void {
           }
 
           let text: string | undefined;
-          let diffPreview: { filePath: string; oldText: string; newText: string } | null = null;
+          let diffPreview: { filePath: string; oldText?: string; newText?: string; diff?: string } | null = null;
           if (payload?.name === 'read_file') { text = data?.content; if (data?.path && rec) rec.filePath = data.path; }
           else if (payload?.name === 'grep_search') text = data?.stdout;
           else if (payload?.name === 'create_file') { text = data?.content; if (data?.path && rec) rec.filePath = data.path; }
@@ -5477,31 +5500,43 @@ function setupAiInput(): void {
               diffPreview = { filePath: String(data?.path || rec?.filePath || ''), oldText: oldT, newText: newT };
             }
             if (data?.path && rec) rec.filePath = data.path;
+          } else if (payload?.name === 'file_change') {
+            const p = data?.preview;
+            if (p && typeof p === 'object') {
+              const diff = typeof p.diff === 'string' ? p.diff : '';
+              diffPreview = {
+                filePath: String(data?.path || p?.path || rec?.filePath || ''),
+                diff,
+              };
+            }
+            if (data?.path && rec) rec.filePath = data.path;
           }
           const hasTextPreview = typeof text === 'string' && text.trim();
-          const hasDiffPreview = payload?.name === 'create_diff' && diffPreview;
+          const hasDiffPreview = (payload?.name === 'create_diff' || payload?.name === 'file_change') && diffPreview;
           if (rec && (hasTextPreview || hasDiffPreview)) {
             const wrapper = document.createElement('div'); wrapper.className = 'preview';
             const details = document.createElement('details');
             // Only open by default for create_diff and create_file during live streaming
-            const isFileModifyTool = payload?.name === 'create_diff' || payload?.name === 'create_file';
+            const isFileModifyTool = payload?.name === 'create_diff' || payload?.name === 'create_file' || payload?.name === 'file_change';
             if (isFileModifyTool) details.open = true;
             const summary = document.createElement('summary');
             const pre = document.createElement('pre');
             const codeEl = document.createElement('code');
             const ext = (rec?.filePath || '').split('.').pop()?.toLowerCase();
             let lang = ext === 'htm' ? 'xml' : (ext || '');
-            const isDiffPreview = payload?.name === 'create_diff';
+            const isDiffPreview = payload?.name === 'create_diff' || payload?.name === 'file_change';
 
             // Truncate very long content for performance
             const MAX_PREVIEW_LINES = 100;
             const langLabel = isDiffPreview ? 'diff' : (lang || 'text');
 
             if (isDiffPreview && diffPreview) {
-              const oldLines = diffPreview.oldText.replace(/\r\n/g, '\n').split('\n');
-              const newLines = diffPreview.newText.replace(/\r\n/g, '\n').split('\n');
-              const fullDiff = generateUnifiedDiff(oldLines, newLines);
-              const meaningfulDiff = filterDiffContext(fullDiff, 3);
+              const meaningfulDiff = typeof diffPreview.diff === 'string' && diffPreview.diff.trim()
+                ? diffPreview.diff.replace(/\r\n/g, '\n').split('\n')
+                : filterDiffContext(generateUnifiedDiff(
+                  String(diffPreview.oldText || '').replace(/\r\n/g, '\n').split('\n'),
+                  String(diffPreview.newText || '').replace(/\r\n/g, '\n').split('\n'),
+                ), 3);
 
               const lineCount = meaningfulDiff.length;
               const isTruncated = lineCount > MAX_PREVIEW_LINES;
@@ -5684,7 +5719,7 @@ function setupAiInput(): void {
         // If we cannot find an existing tool row, render a minimal one
         const ensureRow = () => {
           if (rec && rec.el && rec.contentEl) return rec;
-          const title = payload?.name ? `Tool: ${String(payload.name)}` : 'Tool';
+          const title = prettyName(String(payload?.name || ''));
           addToolLine(id, title, '', payload?.name);
           return toolEls.get(id);
         };
@@ -5712,6 +5747,10 @@ function setupAiInput(): void {
             }
             if (name === 'create_diff') {
               const path = p?.path || JSON.parse(payload?.arguments || '{}')?.filePath || '';
+              const directDiff = typeof p?.diff === 'string' ? p.diff : '';
+              if (directDiff.trim()) {
+                return directDiff.trim();
+              }
               const oldT = typeof p?.oldText === 'string' ? p.oldText : '';
               const newT = typeof p?.newText === 'string' ? p.newText : '';
 
@@ -5774,6 +5813,23 @@ function setupAiInput(): void {
                 sections.push(...diffLines);
               }
               return sections.join('\n');
+            }
+            if (name === 'file_change') {
+              const path = p?.path || JSON.parse(payload?.arguments || '{}')?.path || '';
+              const diff = typeof p?.diff === 'string' ? p.diff.trim() : '';
+              if (diff) {
+                return diff;
+              }
+              return path ? `Apply diff to: ${path}` : 'Apply file changes';
+            }
+            if (name === 'command_execution') {
+              const command = typeof p?.command === 'string' && p.command.trim()
+                ? p.command.trim()
+                : String(JSON.parse(payload?.arguments || '{}')?.command || '').trim();
+              const cwd = typeof p?.cwd === 'string' && p.cwd.trim()
+                ? p.cwd.trim()
+                : String(JSON.parse(payload?.arguments || '{}')?.cwd || '').trim();
+              return cwd ? `Run command in ${cwd}:\n${command}` : `Run command:\n${command}`;
             }
             if (name === 'terminal_input') {
               const t = p?.text ?? '';
@@ -5841,7 +5897,7 @@ function setupAiInput(): void {
           });
         };
         const previewText = renderPreviewText();
-        const isDiffPreview = String(payload?.name || '') === 'create_diff';
+        const isDiffPreview = String(payload?.name || '') === 'create_diff' || String(payload?.name || '') === 'file_change';
         const isCreateFile = String(payload?.name || '') === 'create_file';
 
         // Build informative summary text
@@ -5850,7 +5906,9 @@ function setupAiInput(): void {
         const filePath = p?.path || '';
         const ext = filePath.split('.').pop()?.toLowerCase() || '';
         const langLabel = isDiffPreview ? 'DIFF' : (ext ? ext.toUpperCase() : 'TEXT');
-        const actionLabel = isDiffPreview ? 'Review Changes' : (isCreateFile ? 'Review New File' : 'Review & Approve');
+        const actionLabel = String(payload?.name || '') === 'command_execution'
+          ? 'Run Command'
+          : (isDiffPreview ? 'Review Changes' : (isCreateFile ? 'Review New File' : 'Review & Approve'));
         summary.textContent = `${actionLabel} · ${langLabel} · ${lineCount} line${lineCount !== 1 ? 's' : ''}`;
 
         try {

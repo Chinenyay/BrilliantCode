@@ -1,42 +1,68 @@
-import { createHash } from 'node:crypto';
-import {
-  getSharedCodexClient,
-  type CodexAppServerClient,
-  type CodexThreadItem,
-  type CodexTurn,
-} from './codex-app-server.js';
+import { getSharedCodexClient } from './codex-app-server.js';
+import { getCodexAccessToken } from './codex-token.js';
+import type { AgentSessionClientBindings } from '../agent/session.js';
 
 type CreateCodexChatGPTClientOptions = {
   sessionId?: string;
-  workingDir: string;
-  model: string;
-  autoMode: boolean;
+  workingDir?: string;
+  model?: string;
+  autoMode?: boolean;
 };
 
-type SessionThreadState = {
-  threadId: string;
-  workingDir: string;
-  model: string;
+type CodexChatGPTClient = {
+  bindAgentSession?: (bindings: AgentSessionClientBindings) => void;
+  responses: {
+    create: (params: any) => Promise<any>;
+    stream: (_params: any) => Promise<never>;
+    retrieve: (_responseId: string) => Promise<never>;
+    poll: (_path: string) => Promise<never>;
+  };
 };
 
-type SessionTurnState = {
-  threadId: string;
-  turnId: string;
+type BackendEvent = {
+  event: string;
+  data: any;
 };
 
-const sessionThreads = new Map<string, SessionThreadState>();
-const sessionTurns = new Map<string, SessionTurnState>();
-const TURN_TIMEOUT_MS = 15 * 60 * 1000;
-const HISTORY_CONTEXT_LIMIT = 16_000;
+const CODEX_BACKEND_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
+const DEFAULT_INSTRUCTIONS = 'You are a helpful assistant.';
+const sessionRequests = new Map<string, AbortController>();
 
-function stableHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+function isChatGPTAuthMode(value: unknown): boolean {
+  return value === 'chatgpt' || value === 'chatgptAuthTokens';
 }
 
-function trimText(value: string, limit: number): string {
-  if (value.length <= limit) return value;
-  const omitted = value.length - limit;
-  return `${value.slice(0, limit)}\n... (truncated ${omitted} characters)`;
+async function ensureCodexClientStarted(): Promise<ReturnType<typeof getSharedCodexClient>> {
+  const client = getSharedCodexClient();
+  if (!client.isRunning()) {
+    await client.start();
+  }
+  return client;
+}
+
+async function refreshCodexAccessToken(): Promise<void> {
+  const client = await ensureCodexClientStarted();
+  await client.getAuthState({ refreshToken: true });
+}
+
+async function getUsableCodexAccessToken(): Promise<string> {
+  const existingToken = await getCodexAccessToken();
+  if (existingToken) {
+    return existingToken;
+  }
+
+  try {
+    await refreshCodexAccessToken();
+  } catch {
+    // Fall through and report the missing token below.
+  }
+
+  const refreshedToken = await getCodexAccessToken();
+  if (refreshedToken) {
+    return refreshedToken;
+  }
+
+  throw new Error('ChatGPT sign-in is not configured or no usable Codex access token is available.');
 }
 
 function extractText(content: unknown): string {
@@ -58,399 +84,365 @@ function extractText(content: unknown): string {
       && typeof record.text === 'string'
       && record.text.trim()) {
       parts.push(record.text.trim());
-      continue;
-    }
-
-    if ((type === 'input_image' || type === 'image') && typeof record.image_url === 'string') {
-      parts.push('[image]');
     }
   }
 
   return parts.join('\n').trim();
 }
 
-function normalizeUserContent(content: unknown): Array<Record<string, unknown>> {
-  if (typeof content === 'string') {
-    const text = content.trim();
-    return text ? [{ type: 'text', text, text_elements: [] }] : [];
+function extractInstructions(params: any): string {
+  if (typeof params?.instructions === 'string' && params.instructions.trim()) {
+    return params.instructions.trim();
   }
 
-  if (!Array.isArray(content)) {
-    return [];
-  }
-
-  const out: Array<Record<string, unknown>> = [];
-  for (const part of content) {
-    if (!part || typeof part !== 'object') continue;
-    const record = part as Record<string, unknown>;
-    const type = typeof record.type === 'string' ? record.type : '';
-
-    if (type === 'input_text' && typeof record.text === 'string' && record.text.trim()) {
-      out.push({
-        type: 'text',
-        text: record.text.trim(),
-        text_elements: [],
-      });
-      continue;
-    }
-
-    if (type === 'input_image' && typeof record.image_url === 'string' && record.image_url.trim()) {
-      out.push({
-        type: 'image',
-        url: record.image_url.trim(),
-      });
-    }
-  }
-
-  return out;
-}
-
-function extractDeveloperInstructions(input: unknown): string {
-  if (!Array.isArray(input)) return '';
-
+  const input = Array.isArray(params?.input) ? params.input : [];
   const parts: string[] = [];
+
   for (const item of input) {
     if (!item || typeof item !== 'object') continue;
     const record = item as Record<string, unknown>;
-    if (record.role !== 'developer') continue;
+    const role = typeof record.role === 'string' ? record.role : '';
+    if (role !== 'developer' && role !== 'system') continue;
     const text = extractText(record.content);
     if (text) parts.push(text);
   }
 
-  return parts.join('\n\n').trim();
+  return parts.join('\n\n').trim() || DEFAULT_INSTRUCTIONS;
 }
 
-function findLastUserMessage(input: unknown): { index: number; item: Record<string, unknown> | null } {
-  if (!Array.isArray(input)) {
-    return { index: -1, item: null };
+function normalizeReasoningParts(
+  parts: unknown,
+  expectedType: 'summary_text' | 'reasoning_text',
+): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(parts)) {
+    return undefined;
   }
 
-  for (let index = input.length - 1; index >= 0; index -= 1) {
-    const entry = input[index];
-    if (!entry || typeof entry !== 'object') continue;
-    const record = entry as Record<string, unknown>;
-    if (record.role === 'user') {
-      return { index, item: record };
-    }
-  }
-
-  return { index: -1, item: null };
-}
-
-function buildHistoricalContext(input: unknown, lastUserIndex: number): string {
-  if (!Array.isArray(input) || lastUserIndex <= 0) {
-    return '';
-  }
-
-  const lines: string[] = [];
-  for (let index = 0; index < lastUserIndex; index += 1) {
-    const entry = input[index];
-    if (!entry || typeof entry !== 'object') continue;
-    const record = entry as Record<string, unknown>;
-
-    if (record.role === 'developer') continue;
-
-    if (record.role === 'user') {
-      const text = extractText(record.content);
-      if (text) lines.push(`User: ${text}`);
-      continue;
-    }
-
-    if (record.role === 'assistant') {
-      const text = extractText(record.content);
-      if (text) lines.push(`Assistant: ${text}`);
-      continue;
-    }
-
-    if (record.type === 'function_call_output') {
-      const text = typeof record.output === 'string'
-        ? record.output.trim()
-        : '';
-      if (text) lines.push(`Tool result: ${text}`);
-    }
-  }
-
-  const transcript = lines.join('\n').trim();
-  return transcript ? trimText(transcript, HISTORY_CONTEXT_LIMIT) : '';
-}
-
-function buildTurnInput(params: any, reuseExistingThread: boolean): Array<Record<string, unknown>> {
-  const { index, item } = findLastUserMessage(params?.input);
-  if (!item) {
-    throw new Error('No user message found for Codex app-server turn.');
-  }
-
-  const current = normalizeUserContent(item.content);
-  if (reuseExistingThread) {
-    return current.length ? current : [{ type: 'text', text: '', text_elements: [] }];
-  }
-
-  const historicalContext = buildHistoricalContext(params?.input, index);
-  if (!historicalContext) {
-    return current.length ? current : [{ type: 'text', text: '', text_elements: [] }];
-  }
-
-  return [
-    {
-      type: 'text',
-      text: [
-        'Conversation context from the existing BrilliantCode session:',
-        historicalContext,
-        '',
-        'Continue from that context and answer the latest user request below.',
-      ].join('\n'),
-      text_elements: [],
-    },
-    ...(current.length ? current : [{ type: 'text', text: '', text_elements: [] }]),
-  ];
-}
-
-function buildResponseFromTurn(turn: CodexTurn): any {
-  const items = Array.isArray(turn.items) ? turn.items : [];
-  const output: any[] = [];
-  const outputTextParts: string[] = [];
-
-  for (const item of items) {
-    if (!item || typeof item !== 'object') continue;
-    const typedItem = item as CodexThreadItem;
-
-    if (typedItem.type === 'reasoning') {
-      const summary = Array.isArray(typedItem.summary)
-        ? typedItem.summary
-          .filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
-          .map((text) => ({ text }))
-        : [];
-
-      if (summary.length) {
-        output.push({
-          type: 'reasoning',
-          summary,
-        });
+  const normalized = parts.reduce<Array<Record<string, unknown>>>((acc, part) => {
+      let next: Record<string, unknown> | null = null;
+      if (typeof part === 'string') {
+        const text = part.trim();
+        next = text ? { type: expectedType, text } : null;
+      } else if (part && typeof part === 'object') {
+        const record = { ...(part as Record<string, unknown>) };
+        const text = typeof record.text === 'string' ? record.text.trim() : '';
+        if (text) {
+          next = {
+            ...record,
+            text,
+            type: expectedType,
+          };
+        }
       }
+
+      if (next) {
+        acc.push(next);
+      }
+      return acc;
+    }, []);
+
+  return normalized;
+}
+
+function normalizeBackendItem(item: unknown): unknown {
+  if (!item || typeof item !== 'object') {
+    return item;
+  }
+
+  const record = { ...(item as Record<string, unknown>) };
+  if (record.type !== 'reasoning') {
+    return record;
+  }
+
+  const normalizedSummary = normalizeReasoningParts(record.summary, 'summary_text');
+  if (normalizedSummary) {
+    record.summary = normalizedSummary;
+  }
+
+  const normalizedContent = normalizeReasoningParts(record.content, 'reasoning_text');
+  if (normalizedContent) {
+    record.content = normalizedContent;
+  }
+
+  return record;
+}
+
+function buildBackendInput(params: any): any[] {
+  const input = Array.isArray(params?.input) ? params.input : [];
+  return input.filter((item: unknown) => {
+    if (!item || typeof item !== 'object') return true;
+    const role = typeof (item as Record<string, unknown>).role === 'string'
+      ? String((item as Record<string, unknown>).role)
+      : '';
+    return role !== 'developer' && role !== 'system';
+  }).map(normalizeBackendItem);
+}
+
+function buildBackendRequest(params: any): Record<string, unknown> {
+  const request: Record<string, unknown> = {
+    ...params,
+    instructions: extractInstructions(params),
+    input: buildBackendInput(params),
+    store: false,
+    stream: true,
+  };
+
+  delete request.max_output_tokens;
+  delete request.prompt_cache_key;
+  delete request.prompt_cache_retention;
+
+  return request;
+}
+
+function createRequestError(status: number, detail: string, data?: unknown): Error {
+  const error = new Error(detail || `ChatGPT Codex backend request failed with status ${status}.`) as Error & {
+    status?: number;
+    statusCode?: number;
+    response?: { status: number; data?: unknown };
+  };
+  error.status = status;
+  error.statusCode = status;
+  error.response = { status, data };
+  return error;
+}
+
+function parseBackendEvent(chunk: string): BackendEvent | null {
+  const lines = chunk.split(/\r?\n/);
+  let event = 'message';
+  const dataLines: string[] = [];
+
+  for (const line of lines) {
+    if (!line) continue;
+    if (line.startsWith('event:')) {
+      event = line.slice('event:'.length).trim();
       continue;
     }
-
-    if (typedItem.type === 'agentMessage' && typeof typedItem.text === 'string' && typedItem.text.trim()) {
-      const text = typedItem.text.trim();
-      output.push({
-        type: 'message',
-        role: 'assistant',
-        content: [{ type: 'output_text', text }],
-      });
-      outputTextParts.push(text);
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice('data:'.length).trimStart());
     }
   }
 
-  return {
-    id: `codex-${turn.id}`,
-    status: 'completed',
-    output,
-    output_text: outputTextParts.join('\n\n'),
+  if (!dataLines.length) {
+    return null;
+  }
+
+  const rawData = dataLines.join('\n');
+  if (!rawData || rawData === '[DONE]') {
+    return null;
+  }
+
+  try {
+    return {
+      event,
+      data: JSON.parse(rawData),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractErrorDetail(data: any, fallbackStatus: number): string {
+  const detail = typeof data?.detail === 'string'
+    ? data.detail
+    : typeof data?.error?.message === 'string'
+      ? data.error.message
+      : typeof data?.message === 'string'
+        ? data.message
+        : '';
+  return detail || `ChatGPT Codex backend request failed with status ${fallbackStatus}.`;
+}
+
+async function parseBackendResponseStream(response: Response): Promise<any> {
+  if (!response.body) {
+    throw new Error('ChatGPT Codex backend response body was empty.');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let latestResponse: any = null;
+  let completedResponse: any = null;
+  let failedEvent: any = null;
+
+  const consumeChunk = (chunk: string): void => {
+    const parsed = parseBackendEvent(chunk);
+    if (!parsed) return;
+
+    const payload = parsed.data;
+    if (payload?.response && typeof payload.response === 'object') {
+      latestResponse = payload.response;
+    }
+
+    if (payload?.type === 'response.completed' && payload.response) {
+      completedResponse = payload.response;
+      return;
+    }
+
+    if (payload?.type === 'response.failed' || payload?.type === 'error') {
+      failedEvent = payload;
+    }
   };
-}
 
-async function ensureClientStarted(client: CodexAppServerClient): Promise<void> {
-  if (!client.isRunning()) {
-    await client.start();
-  }
-}
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-async function ensureThread(
-  client: CodexAppServerClient,
-  opts: CreateCodexChatGPTClientOptions,
-  params: any,
-): Promise<{ threadId: string; reused: boolean }> {
-  if (opts.sessionId) {
-    const existing = sessionThreads.get(opts.sessionId);
-    if (existing && existing.model === opts.model && existing.workingDir === opts.workingDir) {
-      return { threadId: existing.threadId, reused: true };
+      buffer += decoder.decode(value, { stream: true });
+
+      while (true) {
+        const match = /\r?\n\r?\n/.exec(buffer);
+        if (!match || typeof match.index !== 'number') break;
+        const rawEvent = buffer.slice(0, match.index);
+        buffer = buffer.slice(match.index + match[0].length);
+        if (rawEvent.trim()) {
+          consumeChunk(rawEvent);
+        }
+      }
     }
+
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      consumeChunk(buffer);
+    }
+  } finally {
+    reader.releaseLock();
   }
 
-  const developerInstructions = extractDeveloperInstructions(params?.input);
-  const result = await client.startThread({
-    model: opts.model,
-    modelProvider: 'openai',
-    cwd: opts.workingDir,
-    approvalPolicy: 'never',
-    sandbox: 'danger-full-access',
-    developerInstructions: developerInstructions || null,
-    experimentalRawEvents: false,
+  if (failedEvent) {
+    const responseStatus = typeof latestResponse?.status_code === 'number' ? latestResponse.status_code : 500;
+    throw createRequestError(responseStatus, extractErrorDetail(failedEvent, responseStatus), failedEvent);
+  }
+
+  if (completedResponse) {
+    return completedResponse;
+  }
+
+  if (latestResponse) {
+    return latestResponse;
+  }
+
+  throw new Error('ChatGPT Codex backend stream ended before returning a response.');
+}
+
+async function fetchBackendResponse(
+  request: Record<string, unknown>,
+  opts?: { allowRefresh?: boolean; signal?: AbortSignal },
+): Promise<any> {
+  const token = await getUsableCodexAccessToken();
+  const response = await fetch(CODEX_BACKEND_RESPONSES_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(request),
+    signal: opts?.signal,
   });
 
-  const threadId = result.thread?.id;
-  if (!threadId) {
-    throw new Error('Codex app-server did not return a thread id.');
+  if (!response.ok) {
+    let data: any = null;
+    try {
+      const text = await response.text();
+      if (!text) {
+        data = null;
+      } else {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = { detail: text };
+        }
+      }
+    } catch {
+      data = null;
+    }
+
+    if (response.status === 401 && opts?.allowRefresh !== false) {
+      await refreshCodexAccessToken();
+      return fetchBackendResponse(request, { allowRefresh: false, signal: opts?.signal });
+    }
+
+    throw createRequestError(
+      response.status,
+      extractErrorDetail(data, response.status),
+      data,
+    );
   }
 
-  if (opts.sessionId) {
-    sessionThreads.set(opts.sessionId, {
-      threadId,
-      workingDir: opts.workingDir,
-      model: opts.model,
-    });
-  }
-
-  return { threadId, reused: false };
-}
-
-function createTurnWatcher(client: CodexAppServerClient, threadId: string): {
-  waitForTurn: (turnId: string) => Promise<CodexTurn>;
-  dispose: () => void;
-} {
-  const completedTurns = new Map<string, CodexTurn>();
-  const turnItems = new Map<string, CodexThreadItem[]>();
-  const waiters = new Map<string, { resolve: (turn: CodexTurn) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-
-  const resolveTurn = (turn: CodexTurn): void => {
-    const mergedTurn: CodexTurn = {
-      ...turn,
-      items: turnItems.get(turn.id) ?? turn.items ?? [],
-    };
-    completedTurns.set(turn.id, mergedTurn);
-    const waiter = waiters.get(turn.id);
-    if (!waiter) return;
-    clearTimeout(waiter.timer);
-    waiters.delete(turn.id);
-    waiter.resolve(mergedTurn);
-  };
-
-  const onNotification = (event: any) => {
-    const method = typeof event?.method === 'string' ? event.method : '';
-    const params = event?.params;
-    if (!params || params.threadId !== threadId) {
-      return;
-    }
-
-    if (method === 'item/completed' && typeof params.turnId === 'string' && params.item) {
-      const existing = turnItems.get(params.turnId) ?? [];
-      existing.push(params.item as CodexThreadItem);
-      turnItems.set(params.turnId, existing);
-      return;
-    }
-
-    if (method === 'turn/completed' && params.turn && typeof params.turn.id === 'string') {
-      resolveTurn(params.turn as CodexTurn);
-    }
-  };
-
-  client.on('notification', onNotification);
-
-  return {
-    waitForTurn: (turnId: string) => {
-      const completed = completedTurns.get(turnId);
-      if (completed) {
-        return Promise.resolve(completed);
-      }
-
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          waiters.delete(turnId);
-          reject(new Error(`Timed out waiting for Codex turn ${turnId} to complete.`));
-        }, TURN_TIMEOUT_MS);
-        waiters.set(turnId, { resolve, reject, timer });
-      });
-    },
-    dispose: () => {
-      client.removeListener('notification', onNotification);
-      for (const waiter of waiters.values()) {
-        clearTimeout(waiter.timer);
-        waiter.reject(new Error('Codex turn watcher disposed before completion.'));
-      }
-      waiters.clear();
-    },
-  };
+  return parseBackendResponseStream(response);
 }
 
 export async function hasCodexChatGPTAuth(): Promise<boolean> {
-  const client = getSharedCodexClient();
-  await ensureClientStarted(client);
-  const auth = await client.getAuthState();
-  return auth.authMode === 'chatgpt' || auth.authMode === 'chatgptAuthTokens';
+  const token = await getCodexAccessToken();
+  if (token) {
+    return true;
+  }
+
+  try {
+    const client = await ensureCodexClientStarted();
+    const auth = await client.getAuthState();
+    return isChatGPTAuthMode(auth.authMode);
+  } catch {
+    return false;
+  }
 }
 
 export function clearCodexChatGPTSession(sessionId?: string): void {
   if (sessionId) {
-    sessionThreads.delete(sessionId);
-    sessionTurns.delete(sessionId);
+    const active = sessionRequests.get(sessionId);
+    if (active) {
+      active.abort();
+      sessionRequests.delete(sessionId);
+    }
     return;
   }
 
-  sessionThreads.clear();
-  sessionTurns.clear();
+  for (const controller of sessionRequests.values()) {
+    controller.abort();
+  }
+  sessionRequests.clear();
 }
 
 export async function interruptCodexChatGPTTurn(sessionId: string): Promise<boolean> {
-  const activeTurn = sessionTurns.get(sessionId);
-  if (!activeTurn) {
+  const active = sessionRequests.get(sessionId);
+  if (!active) {
     return false;
   }
 
-  const client = getSharedCodexClient();
-  await ensureClientStarted(client);
-  await client.interruptTurn(activeTurn);
-  sessionTurns.delete(sessionId);
+  active.abort();
+  sessionRequests.delete(sessionId);
   return true;
 }
 
-export function createCodexChatGPTClient(opts: CreateCodexChatGPTClientOptions): {
-  responses: {
-    create: (params: any) => Promise<any>;
-  };
-} {
-  const sessionKey = opts.sessionId
-    ? stableHash(`${opts.sessionId}:${opts.workingDir}:${opts.model}`)
-    : null;
-
+export function createCodexChatGPTClient(opts: CreateCodexChatGPTClientOptions = {}): CodexChatGPTClient {
   return {
+    bindAgentSession: (_bindings: AgentSessionClientBindings) => {},
     responses: {
       create: async (params: any) => {
-        if (!opts.autoMode) {
-          throw new Error('ChatGPT sign-in currently requires Auto mode. Codex app-server approval requests are not wired into BrilliantCode yet.');
-        }
-
-        const client = getSharedCodexClient();
-        await ensureClientStarted(client);
-
-        const { threadId, reused } = await ensureThread(client, opts, params);
-        const input = buildTurnInput(params, reused);
-        const watcher = createTurnWatcher(client, threadId);
-        const turnResult = await client.startTurn({
-          threadId,
-          input,
-          cwd: opts.workingDir,
-          model: opts.model,
-          approvalPolicy: 'never',
-          sandboxPolicy: { type: 'dangerFullAccess' },
-          effort: params?.reasoning?.effort ?? 'medium',
-          summary: 'auto',
-        });
-
-        const turnId = turnResult.turn?.id;
-        if (!turnId) {
-          throw new Error('Codex app-server did not return a turn id.');
-        }
+        const request = buildBackendRequest(params);
+        const controller = new AbortController();
 
         if (opts.sessionId) {
-          sessionTurns.set(opts.sessionId, { threadId, turnId });
+          sessionRequests.set(opts.sessionId, controller);
         }
 
         try {
-          const turn = turnResult.turn?.status === 'completed'
-            ? turnResult.turn
-            : await watcher.waitForTurn(turnId);
-
-          const response = buildResponseFromTurn(turn);
-          if (sessionKey) {
-            response.id = `${response.id}-${sessionKey.slice(0, 8)}`;
-          }
-          return response;
+          return await fetchBackendResponse(request, { signal: controller.signal });
         } finally {
-          watcher.dispose();
-          if (opts.sessionId) {
-            sessionTurns.delete(opts.sessionId);
+          if (opts.sessionId && sessionRequests.get(opts.sessionId) === controller) {
+            sessionRequests.delete(opts.sessionId);
           }
         }
+      },
+      stream: async () => {
+        throw new Error('Streaming response helpers are not implemented for ChatGPT-authenticated Codex backend sessions.');
+      },
+      retrieve: async () => {
+        throw new Error('Response retrieval is not implemented for ChatGPT-authenticated Codex backend sessions.');
+      },
+      poll: async () => {
+        throw new Error('Response polling is not implemented for ChatGPT-authenticated Codex backend sessions.');
       },
     },
   };

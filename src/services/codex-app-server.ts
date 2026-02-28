@@ -102,16 +102,25 @@ export interface CodexTurnStartResult {
   turn: CodexTurn;
 }
 
+export type CodexJsonRpcId = string | number;
+
+export interface CodexServerRequest {
+  jsonrpc?: '2.0';
+  method: string;
+  id: CodexJsonRpcId;
+  params?: any;
+}
+
 interface JsonRpcRequest {
   jsonrpc?: '2.0';
   method: string;
-  id?: number;
+  id?: CodexJsonRpcId;
   params?: any;
 }
 
 interface JsonRpcResponse {
   jsonrpc?: '2.0';
-  id?: number;
+  id?: CodexJsonRpcId;
   result?: any;
   error?: { code: number; message: string; data?: any };
 }
@@ -130,7 +139,11 @@ export class CodexAppServerClient extends EventEmitter {
   private process: ChildProcess | null = null;
   private rl: readline.Interface | null = null;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void }>();
+  private pending = new Map<number, {
+    resolve: (result: any) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   private initialized = false;
 
   /**
@@ -267,6 +280,32 @@ export class CodexAppServerClient extends EventEmitter {
     await this.request('turn/interrupt', params);
   }
 
+  respond(id: CodexJsonRpcId, result?: any): void {
+    this.send({
+      jsonrpc: '2.0',
+      id,
+      result: result ?? {},
+    } as JsonRpcResponse as JsonRpcRequest);
+  }
+
+  respondError(id: CodexJsonRpcId, error: { code?: number; message: string; data?: any }): void {
+    if (!this.process?.stdin) {
+      throw new Error('Codex app-server is not running');
+    }
+
+    const payload: JsonRpcResponse = {
+      jsonrpc: '2.0',
+      id,
+      error: {
+        code: typeof error.code === 'number' ? error.code : -32000,
+        message: error.message || 'Unknown Codex app-server request error',
+        data: error.data,
+      },
+    };
+
+    this.process.stdin.write(JSON.stringify(payload) + '\n');
+  }
+
   private async initialize(): Promise<void> {
     await this.request('initialize', {
       clientInfo: {
@@ -294,7 +333,14 @@ export class CodexAppServerClient extends EventEmitter {
     const id = this.nextId++;
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        reject(new Error(`Request timeout: ${method}`));
+      }, 30000);
+
+      this.pending.set(id, { resolve, reject, timer });
 
       this.send({
         jsonrpc: '2.0',
@@ -302,35 +348,53 @@ export class CodexAppServerClient extends EventEmitter {
         id,
         params,
       });
-
-      // Timeout after 30 seconds
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`Request timeout: ${method}`));
-        }
-      }, 30000);
     });
   }
 
-  private handleMessage(msg: JsonRpcResponse | JsonRpcNotification): void {
+  private handleMessage(msg: JsonRpcResponse | JsonRpcNotification | CodexServerRequest): void {
     // Handle response to a request
-    if ('id' in msg && typeof msg.id === 'number' && this.pending.has(msg.id)) {
-      const { resolve, reject } = this.pending.get(msg.id)!;
+    if ('id' in msg && typeof msg.id === 'number' && this.pending.has(msg.id) && !('method' in msg && msg.method)) {
+      const { resolve, reject, timer } = this.pending.get(msg.id)!;
+      const response = msg as JsonRpcResponse;
+      clearTimeout(timer);
       this.pending.delete(msg.id);
 
-      if (msg.error) {
-        reject(new Error(msg.error.message ?? 'Unknown error'));
+      if (response.error) {
+        reject(new Error(response.error.message ?? 'Unknown error'));
       } else {
-        resolve(msg.result);
+        resolve(response.result);
       }
       return;
     }
 
     // Handle notifications
     if ('method' in msg && msg.method) {
+      if ('id' in msg && typeof msg.id !== 'undefined') {
+        this.handleServerRequest(msg as CodexServerRequest);
+        return;
+      }
       this.handleNotification(msg as JsonRpcNotification);
     }
+  }
+
+  private handleServerRequest(request: CodexServerRequest): void {
+    if (request.method === 'account/chatgptAuthTokens/refresh') {
+      this.respondError(request.id, {
+        code: -32601,
+        message: 'ChatGPT auth token refresh is not implemented by BrilliantCode.',
+      });
+      return;
+    }
+
+    if (this.listenerCount('request') === 0) {
+      this.respondError(request.id, {
+        code: -32601,
+        message: `Unhandled Codex app-server request: ${request.method}`,
+      });
+      return;
+    }
+
+    this.emit('request', request);
   }
 
   private handleNotification(notification: JsonRpcNotification): void {
@@ -355,6 +419,9 @@ export class CodexAppServerClient extends EventEmitter {
   private cleanup(): void {
     // Clear all pending requests
     for (const [id, { reject }] of this.pending.entries()) {
+      try {
+        clearTimeout(this.pending.get(id)?.timer);
+      } catch {}
       reject(new Error('Codex app-server process terminated'));
     }
     this.pending.clear();

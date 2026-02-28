@@ -4,7 +4,6 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import * as crypto from 'node:crypto';
-import * as http from 'node:http';
 import * as pty from 'node-pty';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
@@ -30,9 +29,6 @@ import * as fsSync from 'node:fs';
 import * as dotenv from 'dotenv';
 import { McpHost, normalizeServerConfig } from './mcpHost.js';
 import * as apiKeys from '../services/api-keys.js';
-import * as openaiOAuth from '../services/openai-oauth.js';
-import type { OpenAIOAuthTokens } from '../services/openai-oauth.js';
-import { parseOpenAIOAuthInput } from './openai-oauth-utils.js';
 import * as versionCheck from '../services/version-check.js';
 import { setupAutoUpdater, checkForUpdates as checkAutoUpdates } from '../services/auto-updater.js';
 import { getSharedCodexClient, stopSharedCodexClient } from '../services/codex-app-server.js';
@@ -40,7 +36,6 @@ import {
   clearCodexChatGPTSession,
   createCodexChatGPTClient,
   hasCodexChatGPTAuth,
-  interruptCodexChatGPTTurn,
 } from '../services/codex-chatgpt-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1055,376 +1050,16 @@ const createRequestGate = (limit: number) => {
 const MODEL_REQUEST_CONCURRENCY = parseEnvInt(['AGENT_MAX_CONCURRENT_REQUESTS', 'AGENT_MODEL_CONCURRENCY'], 1);
 const withModelRequestGate = createRequestGate(MODEL_REQUEST_CONCURRENCY);
 
-const OPENAI_OAUTH_AUTHORIZE_URL = (process.env.OPENAI_OAUTH_AUTHORIZE_URL || 'https://auth.openai.com/oauth/authorize').trim();
-const OPENAI_OAUTH_TOKEN_URL = (process.env.OPENAI_OAUTH_TOKEN_URL || 'https://auth.openai.com/oauth/token').trim();
-const OPENAI_OAUTH_CLIENT_ID = (process.env.OPENAI_OAUTH_CLIENT_ID || '').trim();
-const OPENAI_OAUTH_AUDIENCE = (process.env.OPENAI_OAUTH_AUDIENCE || 'https://api.openai.com/v1').trim();
-const OPENAI_OAUTH_SCOPES = (process.env.OPENAI_OAUTH_SCOPES || 'openid profile email offline_access').trim();
-const OPENAI_OAUTH_REDIRECT_URI = (process.env.OPENAI_OAUTH_REDIRECT_URI || 'http://127.0.0.1:1455/auth/callback').trim();
-const OPENAI_OAUTH_ORIGINATOR = (process.env.OPENAI_OAUTH_ORIGINATOR || 'codex_vscode').trim();
-const OPENAI_OAUTH_CODEX_FLOW = (process.env.OPENAI_OAUTH_CODEX_FLOW || 'true').trim();
-const OPENAI_OAUTH_ID_TOKEN_ADD_ORGS = (process.env.OPENAI_OAUTH_ID_TOKEN_ADD_ORGS || 'true').trim();
-const OPENAI_OAUTH_CALLBACK_TIMEOUT_MS = parseEnvInt(['OPENAI_OAUTH_CALLBACK_TIMEOUT_MS'], 10 * 60 * 1000);
-
-type PendingOpenAIOAuth = {
-  state: string;
-  codeVerifier: string;
-  codeChallenge: string;
-  redirectUri: string;
-  createdAt: number;
-  host: string;
-  port: number;
-  callbackPath: string;
-  server?: http.Server;
-};
-
-let pendingOpenAIOAuth: PendingOpenAIOAuth | null = null;
-let pendingOpenAIOAuthTimer: NodeJS.Timeout | null = null;
-let openaiOAuthRefreshPromise: Promise<string> | null = null;
-
-const base64UrlEncode = (value: Buffer | Uint8Array): string =>
-  Buffer.from(value)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-
-const base64UrlDecode = (value: string): Buffer => {
-  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
-  return Buffer.from(padded, 'base64');
-};
-
-const createCodeVerifier = (): string => base64UrlEncode(crypto.randomBytes(32));
-
-const createCodeChallenge = (verifier: string): string =>
-  base64UrlEncode(crypto.createHash('sha256').update(verifier).digest());
-
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  if (typeof token !== 'string') return null;
-  const parts = token.split('.');
-  if (parts.length < 2) return null;
-  try {
-    const payload = base64UrlDecode(parts[1] || '').toString('utf8');
-    const parsed = JSON.parse(payload);
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function extractAccountIdFromToken(token: string): string | null {
-  const payload = decodeJwtPayload(token);
-  if (!payload) return null;
-  const accountId = payload.account_id ?? payload.accountId ?? payload.sub;
-  return typeof accountId === 'string' && accountId.trim() ? accountId.trim() : null;
-}
-
-function extractAccountId(accessToken: string, idToken?: string): string | null {
-  return extractAccountIdFromToken(accessToken) || (idToken ? extractAccountIdFromToken(idToken) : null);
-}
-
-function clearPendingOpenAIOAuth(): void {
-  if (pendingOpenAIOAuthTimer) {
-    clearTimeout(pendingOpenAIOAuthTimer);
-    pendingOpenAIOAuthTimer = null;
-  }
-  if (pendingOpenAIOAuth?.server) {
-    try { pendingOpenAIOAuth.server.close(); } catch {}
-  }
-  pendingOpenAIOAuth = null;
-}
-
-async function startOpenAIOAuthListener(pending: PendingOpenAIOAuth): Promise<{ ok: boolean; error?: string }> {
-  return await new Promise((resolve) => {
-    const server = http.createServer((req, res) => {
-      const respond = (status: number, message: string) => {
-        res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
-        res.end(message);
-      };
-
-      void (async () => {
-        const reqUrl = new URL(req.url || '', pending.redirectUri);
-        if (reqUrl.pathname !== pending.callbackPath) {
-          respond(404, 'Not Found');
-          return;
-        }
-
-        const errorParam = reqUrl.searchParams.get('error');
-        const errorDesc = reqUrl.searchParams.get('error_description');
-        const state = (reqUrl.searchParams.get('state') || '').trim();
-        const code = (reqUrl.searchParams.get('code') || '').trim();
-
-        if (errorParam) {
-          respond(400, `OAuth error: ${errorParam}${errorDesc ? ` (${errorDesc})` : ''}`);
-          clearPendingOpenAIOAuth();
-          return;
-        }
-
-        if (!state) {
-          respond(400, 'Missing state. Please retry sign-in from BrilliantCode.');
-          clearPendingOpenAIOAuth();
-          return;
-        }
-        if (state !== pending.state) {
-          respond(400, 'State mismatch. Please retry sign-in.');
-          clearPendingOpenAIOAuth();
-          return;
-        }
-        if (!code) {
-          respond(400, 'Missing authorization code.');
-          return;
-        }
-
-        try {
-          await completeOpenAIOAuthFromCode(code, state);
-          respond(200, 'Sign-in complete. You can return to BrilliantCode.');
-        } catch (error: any) {
-          const message = error?.message || 'Token exchange failed';
-          clearPendingOpenAIOAuth();
-          respond(500, `Sign-in failed: ${message}. Return to BrilliantCode and retry.`);
-        }
-      })();
-    });
-
-    server.once('error', (error: any) => {
-      try { server.close(); } catch {}
-      resolve({ ok: false, error: error?.message || 'Failed to start callback listener.' });
-    });
-
-    server.listen(pending.port, pending.host, () => {
-      pending.server = server;
-      resolve({ ok: true });
-    });
-  });
-}
-
-function buildOpenAIOAuthAuthorizeUrl(pending: PendingOpenAIOAuth): string {
-  const url = new URL(OPENAI_OAUTH_AUTHORIZE_URL);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('client_id', OPENAI_OAUTH_CLIENT_ID);
-  url.searchParams.set('redirect_uri', pending.redirectUri);
-  url.searchParams.set('scope', OPENAI_OAUTH_SCOPES);
-  url.searchParams.set('state', pending.state);
-  url.searchParams.set('code_challenge', pending.codeChallenge);
-  url.searchParams.set('code_challenge_method', 'S256');
-  if (OPENAI_OAUTH_AUDIENCE) url.searchParams.set('audience', OPENAI_OAUTH_AUDIENCE);
-  if (OPENAI_OAUTH_ID_TOKEN_ADD_ORGS) url.searchParams.set('id_token_add_organizations', OPENAI_OAUTH_ID_TOKEN_ADD_ORGS);
-  if (OPENAI_OAUTH_CODEX_FLOW) url.searchParams.set('codex_cli_simplified_flow', OPENAI_OAUTH_CODEX_FLOW);
-  if (OPENAI_OAUTH_ORIGINATOR) url.searchParams.set('originator', OPENAI_OAUTH_ORIGINATOR);
-  return url.toString();
-}
-
-async function fetchOpenAIOAuthToken(body: URLSearchParams): Promise<any> {
-  const response = await fetch(OPENAI_OAUTH_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-  const text = await response.text();
-  let payload: any = null;
-  if (text) {
-    try { payload = JSON.parse(text); } catch {}
-  }
-  if (!response.ok) {
-    const message = payload?.error_description || payload?.error || text || `${response.status} status code`;
-    const error = new Error(message);
-    (error as any).status = response.status;
-    throw error;
-  }
-  return payload || {};
-}
-
-function buildOpenAIOAuthTokens(payload: any, fallbackRefreshToken?: string): OpenAIOAuthTokens {
-  const accessToken = typeof payload?.access_token === 'string' ? payload.access_token.trim() : '';
-  if (!accessToken) throw new Error('OAuth token response missing access_token.');
-  const refreshToken = typeof payload?.refresh_token === 'string' ? payload.refresh_token.trim() : (fallbackRefreshToken || '');
-  const expiresIn = Number(payload?.expires_in);
-  const expiresAt = Number.isFinite(expiresIn) && expiresIn > 0
-    ? Date.now() + Math.floor(expiresIn * 1000)
-    : Date.now() + 55 * 60 * 1000;
-  const accountId = extractAccountId(accessToken, typeof payload?.id_token === 'string' ? payload.id_token : undefined);
-  const tokens: OpenAIOAuthTokens = { access: accessToken, expires: expiresAt };
-  if (refreshToken) tokens.refresh = refreshToken;
-  if (accountId) tokens.accountId = accountId;
-  return tokens;
-}
-
-async function exchangeOpenAIOAuthCode(code: string, codeVerifier: string, redirectUri: string): Promise<OpenAIOAuthTokens> {
-  if (!OPENAI_OAUTH_CLIENT_ID) {
-    throw new Error('OPENAI_OAUTH_CLIENT_ID is not set. Unable to exchange the authorization code.');
-  }
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    client_id: OPENAI_OAUTH_CLIENT_ID,
-    code,
-    redirect_uri: redirectUri,
-    code_verifier: codeVerifier,
-  });
-  const payload = await fetchOpenAIOAuthToken(body);
-  return buildOpenAIOAuthTokens(payload);
-}
-
-async function refreshOpenAIOAuthTokens(refreshToken: string): Promise<OpenAIOAuthTokens> {
-  if (!OPENAI_OAUTH_CLIENT_ID) {
-    throw new Error('OPENAI_OAUTH_CLIENT_ID is not set. Unable to refresh ChatGPT sign-in.');
-  }
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    client_id: OPENAI_OAUTH_CLIENT_ID,
-    refresh_token: refreshToken,
-  });
-  const payload = await fetchOpenAIOAuthToken(body);
-  return buildOpenAIOAuthTokens(payload, refreshToken);
-}
-
-async function completeOpenAIOAuthFromCode(code: string, state: string): Promise<OpenAIOAuthTokens> {
-  const pending = pendingOpenAIOAuth;
-  if (!pending) {
-    throw new Error('No pending ChatGPT sign-in. Click "Sign in with ChatGPT" first.');
-  }
-  if (!state || state !== pending.state) {
-    throw new Error('State mismatch. Please restart the sign-in flow.');
-  }
-  const tokens = await exchangeOpenAIOAuthCode(code, pending.codeVerifier, pending.redirectUri);
-  await openaiOAuth.setOpenAIOAuthTokens(tokens);
-  clearPendingOpenAIOAuth();
-  return tokens;
-}
-
-async function startOpenAIOAuthFlow(): Promise<{
-  ok: boolean;
-  authUrl?: string;
-  redirectUri?: string;
-  manual?: boolean;
-  browserOpened?: boolean;
-  error?: string;
-}> {
-  if (!OPENAI_OAUTH_CLIENT_ID) {
-    return { ok: false, error: 'OPENAI_OAUTH_CLIENT_ID is not set. Add it to your environment to enable ChatGPT sign-in.' };
-  }
-
-  let redirect: URL;
-  try {
-    redirect = new URL(OPENAI_OAUTH_REDIRECT_URI);
-  } catch {
-    return { ok: false, error: 'OPENAI_OAUTH_REDIRECT_URI is invalid. Please fix it and retry.' };
-  }
-
-  clearPendingOpenAIOAuth();
-
-  const codeVerifier = createCodeVerifier();
-  const codeChallenge = createCodeChallenge(codeVerifier);
-  const state = base64UrlEncode(crypto.randomBytes(16));
-  const host = redirect.hostname || '127.0.0.1';
-  const port = Number(redirect.port) || (redirect.protocol === 'https:' ? 443 : 80);
-  const callbackPath = redirect.pathname || '/';
-
-  const pending: PendingOpenAIOAuth = {
-    state,
-    codeVerifier,
-    codeChallenge,
-    redirectUri: redirect.toString(),
-    createdAt: Date.now(),
-    host,
-    port,
-    callbackPath,
-  };
-
-  pendingOpenAIOAuth = pending;
-  pendingOpenAIOAuthTimer = setTimeout(() => clearPendingOpenAIOAuth(), OPENAI_OAUTH_CALLBACK_TIMEOUT_MS);
-
-  let manual = false;
-  let error: string | undefined;
-  const listenerResult = await startOpenAIOAuthListener(pending);
-  if (!listenerResult.ok) {
-    manual = true;
-    error = listenerResult.error || 'Callback listener not available. Use manual paste instead.';
-  }
-
-  const authUrl = buildOpenAIOAuthAuthorizeUrl(pending);
-  let browserOpened = true;
-  try {
-    await shell.openExternal(authUrl);
-  } catch (openErr: any) {
-    browserOpened = false;
-    const openError = openErr?.message || 'Failed to open your browser.';
-    error = error ? `${error} ${openError}` : openError;
-  }
-
-  return { ok: true, authUrl, redirectUri: pending.redirectUri, manual, browserOpened, error };
-}
-
-async function getOpenAIOAuthAccessToken(): Promise<string | null> {
-  const tokens = await openaiOAuth.getOpenAIOAuthTokens();
-  if (!tokens?.access) return null;
-
-  const expiresAt = Number(tokens.expires || 0);
-  const hasExpiry = Number.isFinite(expiresAt) && expiresAt > 0;
-  const expired = hasExpiry && Date.now() >= (expiresAt - 60_000);
-  if (!expired) return tokens.access;
-
-  if (!tokens.refresh) {
-    throw new Error('ChatGPT sign-in has expired. Please sign in again.');
-  }
-
-  if (openaiOAuthRefreshPromise) {
-    return await openaiOAuthRefreshPromise;
-  }
-
-  openaiOAuthRefreshPromise = (async () => {
-    const refreshed = await refreshOpenAIOAuthTokens(tokens.refresh || '');
-    await openaiOAuth.setOpenAIOAuthTokens(refreshed);
-    return refreshed.access;
-  })();
-
-  try {
-    return await openaiOAuthRefreshPromise;
-  } finally {
-    openaiOAuthRefreshPromise = null;
-  }
-}
-
-async function getOpenAIOAuthStatus(): Promise<{ configured: boolean; accountId?: string; expiresAt?: number; expired?: boolean }> {
-  // First check the official Codex app-server auth state.
-  try {
-    const codexClient = getSharedCodexClient();
-    if (!codexClient.isRunning()) {
-      await codexClient.start();
-    }
-    const authState = await codexClient.getAuthState();
-    if (authState.authMode === 'chatgpt' || authState.authMode === 'chatgptAuthTokens') {
-      return {
-        configured: true,
-        accountId: authState.account?.email || authState.account?.id,
-      };
-    }
-  } catch {
-    // Fall through to the legacy token store.
-  }
-
-  // Fall back to legacy OAuth tokens
-  const tokens = await openaiOAuth.getOpenAIOAuthTokens();
-  if (!tokens?.access) return { configured: false };
-  const expiresAt = typeof tokens.expires === 'number' ? tokens.expires : undefined;
-  const expired = typeof expiresAt === 'number' ? Date.now() >= (expiresAt - 60_000) : false;
-  const hasRefresh = typeof tokens.refresh === 'string' && !!tokens.refresh.trim();
-  const configured = !expired || hasRefresh;
-  return {
-    configured,
-    accountId: tokens.accountId || undefined,
-    expiresAt,
-    expired,
-  };
-}
-
 const llmClient = (() => {
-    const buildOpenAIClient = async (): Promise<OpenAI> => {
+    const buildOpenAIClient = async (): Promise<any> => {
         const { key } = await apiKeys.getApiKey('openai');
         if (key) {
             return new OpenAI({ apiKey: key });
         }
-        throw new Error('OpenAI API key is not configured. ChatGPT sign-in uses the Codex app-server path, not a direct OpenAI API key.');
+        if (await hasCodexChatGPTAuth()) {
+            return createCodexChatGPTClient();
+        }
+        throw new Error('OpenAI API key is not configured, and no ChatGPT Codex sign-in is available.');
     };
 
     const buildOpenAICompatClient = async (): Promise<OpenAI> => {
@@ -1684,9 +1319,6 @@ ipcMain.handle('api-keys:clear-compat-base-url', async () => {
 
 // ---------------- Codex ChatGPT Login IPC surface (using app-server) ----------------
 
-// Track active login state
-let activeCodexLogin: { loginId: string; authUrl: string } | null = null;
-
 ipcMain.handle('openai-oauth:status', async () => {
   try {
     const codexClient = getSharedCodexClient();
@@ -1707,14 +1339,7 @@ ipcMain.handle('openai-oauth:status', async () => {
 
     return { ok: true, status };
   } catch (error: any) {
-    // If Codex app-server is not available, fall back to checking stored tokens
-    // This provides backward compatibility
-    try {
-      const status = await getOpenAIOAuthStatus();
-      return { ok: true, status };
-    } catch {
-      return { ok: false, error: error?.message || 'Failed to load ChatGPT sign-in status.' };
-    }
+    return { ok: false, error: error?.message || 'Failed to load ChatGPT sign-in status.' };
   }
 });
 
@@ -1729,7 +1354,6 @@ ipcMain.handle('openai-oauth:start', async () => {
     }
 
     const handler = () => {
-      activeCodexLogin = null;
       codexClient.removeListener('login:completed', handler);
     };
     completedHandler = handler;
@@ -1737,7 +1361,6 @@ ipcMain.handle('openai-oauth:start', async () => {
 
     // Start the login flow
     const loginResult = await codexClient.startChatGPTLogin();
-    activeCodexLogin = loginResult;
 
     // Open the browser
     let browserOpened = true;
@@ -1758,47 +1381,7 @@ ipcMain.handle('openai-oauth:start', async () => {
     if (completedHandler) {
       try { getSharedCodexClient().removeListener('login:completed', completedHandler); } catch {}
     }
-    activeCodexLogin = null;
     return { ok: false, error: error?.message || 'Failed to start ChatGPT sign-in. Make sure the Codex CLI is installed.' };
-  }
-});
-
-ipcMain.handle('openai-oauth:exchange', async (_event: Electron.IpcMainInvokeEvent, payload: { redirectUrl?: string; code?: string }) => {
-  try {
-    // With Codex app-server, the exchange happens automatically
-    // This handler is kept for backward compatibility but just waits for completion
-    // In practice, the user shouldn't need to manually paste the callback URL
-
-    // If there's no active login, fall back to the old OAuth flow
-    if (!activeCodexLogin) {
-      const raw = typeof payload?.redirectUrl === 'string' && payload.redirectUrl.trim()
-        ? payload.redirectUrl
-        : typeof payload?.code === 'string'
-          ? payload.code
-          : '';
-      const parsed = parseOpenAIOAuthInput(raw);
-      if (!parsed?.code || !parsed.state) {
-        return { ok: false, error: 'No active Codex login session. Please start sign-in first.' };
-      }
-      await completeOpenAIOAuthFromCode(parsed.code, parsed.state);
-      const status = await getOpenAIOAuthStatus();
-      return { ok: true, status };
-    }
-
-    // Wait a bit for the Codex app-server to complete the login
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    const codexClient = getSharedCodexClient();
-    const authState = await codexClient.getAuthState();
-
-    const status = {
-      configured: authState.authMode === 'chatgpt' || authState.authMode === 'chatgptAuthTokens',
-      accountId: authState.account?.email || authState.account?.id,
-    };
-
-    return { ok: true, status };
-  } catch (error: any) {
-    return { ok: false, error: error?.message || 'Failed to complete ChatGPT sign-in.' };
   }
 });
 
@@ -1810,12 +1393,7 @@ ipcMain.handle('openai-oauth:clear', async () => {
       await codexClient.logout();
     }
 
-    // Also clear any legacy stored tokens
-    clearPendingOpenAIOAuth();
-    await openaiOAuth.clearOpenAIOAuthTokens();
     clearCodexChatGPTSession();
-
-    activeCodexLogin = null;
 
     return { ok: true };
   } catch (error: any) {
@@ -3612,24 +3190,7 @@ ipcMain.on('ai:chatStream', async (ipcEvent: IpcMainEvent, payload: {
         const titleSeed = deriveTitleFromHistory(newItems);
         const provider = getModelProvider(model);
 
-        let sessionClient = client;
-        if (provider === 'openai') {
-          const { key } = await apiKeys.getApiKey('openai');
-          if (!key) {
-            try {
-              if (await hasCodexChatGPTAuth()) {
-                sessionClient = createCodexChatGPTClient({
-                  sessionId,
-                  workingDir: resolvedWorkingDir,
-                  model,
-                  autoMode,
-                }) as typeof client;
-              }
-            } catch {
-              // Fall back to the direct OpenAI path below, which will surface a clear auth error.
-            }
-          }
-        }
+        const sessionClient = client;
 
         agentSessionManager.attach(sessionId, wc, win.id);
 
@@ -3668,7 +3229,6 @@ ipcMain.on('ai:stop', (ipcEvent: IpcMainEvent, payload: { sessionId?: string }) 
     const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
     if (!sessionId) return;
     agentSessionManager.stop(sessionId);
-    void interruptCodexChatGPTTurn(sessionId).catch(() => {});
 
     // If the UI is showing a persisted "running" state but there is no live run
     // (common after app restart), reconcile the stored runtime so the session
