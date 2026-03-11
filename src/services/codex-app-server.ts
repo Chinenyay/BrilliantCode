@@ -131,6 +131,15 @@ interface JsonRpcNotification {
   params?: any;
 }
 
+function toCodexProcessError(error: unknown): Error {
+  const base = error instanceof Error ? error : new Error(String(error ?? 'Unknown Codex app-server error'));
+  const code = (base as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') {
+    return new Error('Codex CLI is not installed or is not on PATH. Install Codex to use ChatGPT sign-in, or continue with an OpenAI API key.');
+  }
+  return base;
+}
+
 /**
  * Client for communicating with the Codex app-server.
  * Implements the official Codex app-server protocol for authentication and session management.
@@ -155,6 +164,18 @@ export class CodexAppServerClient extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const settleResolve = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const settleReject = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+
       try {
         this.process = spawn('codex', ['app-server'], {
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -175,9 +196,14 @@ export class CodexAppServerClient extends EventEmitter {
         });
 
         this.process.on('error', (err) => {
-          this.emit('error', err);
+          const wrapped = toCodexProcessError(err);
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', wrapped);
+          } else {
+            console.error('[codex-app-server] Process error:', wrapped);
+          }
           if (!this.initialized) {
-            reject(new Error(`Failed to start Codex app-server: ${err.message}`));
+            settleReject(wrapped);
           }
         });
 
@@ -197,11 +223,11 @@ export class CodexAppServerClient extends EventEmitter {
         this.initialize()
           .then(() => {
             this.initialized = true;
-            resolve();
+            settleResolve();
           })
-          .catch(reject);
+          .catch((error) => settleReject(toCodexProcessError(error)));
       } catch (err) {
-        reject(err);
+        settleReject(toCodexProcessError(err));
       }
     });
   }

@@ -41,7 +41,10 @@ async function ensureCodexClientStarted(): Promise<ReturnType<typeof getSharedCo
 }
 
 async function refreshCodexAccessToken(): Promise<void> {
-  const client = await ensureCodexClientStarted();
+  const client = getSharedCodexClient();
+  if (!client.isRunning()) {
+    throw new Error('ChatGPT sign-in is not active. Choose "Sign in with ChatGPT" to refresh the session.');
+  }
   await client.getAuthState({ refreshToken: true });
 }
 
@@ -409,8 +412,12 @@ export async function hasCodexChatGPTAuth(): Promise<boolean> {
     return true;
   }
 
+  const client = getSharedCodexClient();
+  if (!client.isRunning()) {
+    return false;
+  }
+
   try {
-    const client = await ensureCodexClientStarted();
     const auth = await client.getAuthState();
     return isChatGPTAuthMode(auth.authMode);
   } catch {

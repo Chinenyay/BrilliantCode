@@ -32,6 +32,7 @@ import * as apiKeys from '../services/api-keys.js';
 import * as versionCheck from '../services/version-check.js';
 import { setupAutoUpdater, checkForUpdates as checkAutoUpdates } from '../services/auto-updater.js';
 import { getSharedCodexClient, stopSharedCodexClient } from '../services/codex-app-server.js';
+import { getCodexAccessToken, getCodexAccountId } from '../services/codex-token.js';
 import {
   clearCodexChatGPTSession,
   createCodexChatGPTClient,
@@ -1268,6 +1269,16 @@ const llmClient = (() => {
 
 const client = llmClient;
 
+function mapCodexAuthStateToStatus(authState: { authMode: string; account?: { email?: string; id?: string } | null }): {
+  configured: boolean;
+  accountId?: string;
+} {
+  return {
+    configured: authState.authMode === 'chatgpt' || authState.authMode === 'chatgptAuthTokens',
+    accountId: authState.account?.email || authState.account?.id,
+  };
+}
+
 // ---------------- API keys IPC surface ----------------
 ipcMain.handle('api-keys:status', async () => {
   try {
@@ -1332,18 +1343,21 @@ ipcMain.handle('openai-oauth:status', async () => {
   try {
     const codexClient = getSharedCodexClient();
 
-    // Ensure the client is started
-    if (!codexClient.isRunning()) {
-      await codexClient.start();
+    // Never start Codex just to read status. This keeps API-key-only usage working
+    // on machines where the Codex CLI is not installed.
+    if (codexClient.isRunning()) {
+      const authState = await codexClient.getAuthState();
+      return { ok: true, status: mapCodexAuthStateToStatus(authState) };
     }
 
-    const authState = await codexClient.getAuthState();
+    const token = await getCodexAccessToken();
+    if (!token) {
+      return { ok: true, status: { configured: false } };
+    }
 
-    // Map Codex auth state to our existing status format
     const status = {
-      configured: authState.authMode === 'chatgpt' || authState.authMode === 'chatgptAuthTokens',
-      accountId: authState.account?.email || authState.account?.id,
-      // Codex doesn't expose token expiry, so we don't include it
+      configured: true,
+      accountId: (await getCodexAccountId()) || undefined,
     };
 
     return { ok: true, status };
