@@ -4198,9 +4198,12 @@ function showAddMcpServerDialog(parent?: Electron.BrowserWindow | null): void {
     width: 540,
     height: 520,
     resizable: false,
+    show: false,
+    backgroundColor: '#0b0b0b',
     title: 'Add MCP Server',
     webPreferences: { contextIsolation: true, nodeIntegration: false, preload }
   });
+  win.once('ready-to-show', () => win.show());
   const html = `<!doctype html>
   <meta charset="utf-8">
   <title>Add MCP Server</title>
@@ -4322,9 +4325,12 @@ function showApiKeysDialog(parent?: Electron.BrowserWindow | null): void {
     width: 540,
     height: 520,
     resizable: false,
+    show: false,
+    backgroundColor: '#0b0b0b',
     title: 'API Keys',
     webPreferences: { contextIsolation: true, nodeIntegration: false, preload }
   });
+  win.once('ready-to-show', () => win.show());
 
   const html = `<!doctype html>
   <meta charset="utf-8">
